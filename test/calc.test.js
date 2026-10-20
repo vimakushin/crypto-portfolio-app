@@ -298,6 +298,45 @@ test('история из тысячи разных операций счита�
   assert.ok(performance.now() - started < 1000, 'расчёт занял больше секунды');
 });
 
+test('комиссия биржи при покупке: деньги остаются на полученных монетах', () => {
+  // Купил на 200 $ по 146.12, биржа взяла комиссию монетами — пришло 1.3674.
+  // Средняя: 200 / 1.3674, выше цены покупки.
+  const operations = [{ ...buy('2026-01-01', 'Binance', '200', '146.12'), received: '1.3674' }];
+  assert.equal(sol(operations).quantity, exact(13674) / 10000n);
+  assert.equal(sol(operations).cost, exact(200));
+  near(sol(operations).average, 2000000, 13674);
+  assert.ok(sol(operations).average > exact(14612) / 100n);
+});
+
+test('комиссия биржи: «получено» ровно по расчёту — то же, что без него', () => {
+  const plain = sol([buy('2026-01-01', 'Binance', '300', '150')]);
+  const same = sol([{ ...buy('2026-01-01', 'Binance', '300', '150'), received: '2' }]);
+  assert.equal(same.quantity, plain.quantity);
+  assert.equal(same.average, plain.average);
+});
+
+test('комиссия биржи дальше ведёт себя как обычная средняя', () => {
+  // 300 $ по 150, получено 1.98: средняя 300/1.98. Потом 50 $ по 125 без
+  // комиссии в кошелёк, перевод 1 без комиссии и продажа 0.5.
+  const operations = [
+    { ...buy('2026-01-10', 'Binance', '300', '150'), received: '1.98' },
+    buy('2026-02-01', 'Кошелёк', '50', '125'),
+    transfer('2026-02-15', 'Binance', 'Кошелёк', '1', '1'),
+    sell('2026-03-01', 'Binance', { quantity: '0.5' }),
+  ];
+  // Binance: 0.48 SOL по 300/1.98. Кошелёк: 1.4 SOL, 50 + 300/1.98 $.
+  near(pf(operations, 'Binance').average, 30000, 198);
+  near(pf(operations, 'Binance').quantity, 48, 100);
+  near(pf(operations, 'Кошелёк').cost, 50 * 198 + 30000, 198);
+  near(pf(operations, 'Кошелёк').average, (50 * 198 + 30000) * 10, 198 * 14);
+});
+
+test('комиссия биржи: получить больше купленного нельзя', () => {
+  fails([{ ...buy('2026-01-01', 'Binance', '300', '150'), received: '2.0000001' }], /получено больше/);
+  fails([{ ...buy('2026-01-01', 'Binance', '300', '150'), received: '0' }], /больше нуля/);
+  fails([{ ...buy('2026-01-01', 'Binance', '300', '150'), received: '1,98' }], /не число/);
+});
+
 test('показ числа: округление до ближайшего и без лишних нулей', () => {
   const units = (text) => {
     const [whole, fraction = ''] = text.split('.');

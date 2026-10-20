@@ -34,6 +34,14 @@
       </div>
 
       <div class="field">
+        <label for="received">Получено монет</label>
+        <input id="received" name="received" inputmode="decimal" autocomplete="off"
+               placeholder="Если биржа взяла комиссию монетами" enterkeyhint="done">
+        <p class="hint" id="fee"></p>
+        <p class="error" id="received-error"></p>
+      </div>
+
+      <div class="field">
         <span class="label" id="portfolio-label">Портфель</span>
         <div class="chips" id="portfolios" role="group" aria-labelledby="portfolio-label"></div>
         <input id="portfolio" name="portfolio" autocomplete="off" placeholder="Биржа или кошелёк, например Binance"

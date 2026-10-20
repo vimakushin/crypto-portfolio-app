@@ -120,7 +120,18 @@ function apply(portfolios, op) {
     const p = position(portfolios, op.portfolio);
     // Количество не вводится, а считается: человек помнит «закинул 200
     // долларов», а не «купил 1.3687 SOL».
-    p.quantity += divide(money * SCALE, price);
+    const bought = divide(money * SCALE, price);
+    // Если биржа взяла комиссию монетами, пришло меньше. Тогда человек
+    // вписывает, сколько получил, и правило то же, что у комиссии сети при
+    // переводе: деньги не теряются, а ложатся на полученные монеты, и средняя
+    // чуть выше цены. Получить больше, чем куплено, нельзя: это опечатка в
+    // количестве или цене, и она тихо занизила бы среднюю.
+    let quantity = bought;
+    if (op.received !== undefined) {
+      quantity = amount(op, 'received');
+      if (quantity > bought) fail(op, 'получено больше, чем деньги ÷ цена');
+    }
+    p.quantity += quantity;
     p.cost += money;
   } else if (op.type === 'sell') {
     // Продажу вводят либо количеством, либо полученными деньгами и ценой.
