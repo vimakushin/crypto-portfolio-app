@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { calculate, SCALE } from '../src/calc.js';
+import { calculate, formatAmount, SCALE } from '../src/calc.js';
 
 // Ожидаемые значения посчитаны вручную и записаны дробями: near(x, 400, 3)
 // значит «x равно 400/3». Расчёт округляет деление в 30-м знаке, поэтому
@@ -296,6 +296,27 @@ test('история из тысячи разных операций счита�
   const started = performance.now();
   assert.deepEqual(calculate(operations).errors, []);
   assert.ok(performance.now() - started < 1000, 'расчёт занял больше секунды');
+});
+
+test('показ числа: округление до ближайшего и без лишних нулей', () => {
+  const units = (text) => {
+    const [whole, fraction = ''] = text.split('.');
+    return BigInt(whole + fraction.padEnd(30, '0'));
+  };
+  assert.equal(formatAmount(units('1.368738023542294'), 8), '1.36873802');
+  assert.equal(formatAmount(units('1.368738025'), 8), '1.36873803'); // ровно половина — вверх
+  assert.equal(formatAmount(units('0.002'), 8), '0.002');
+  assert.equal(formatAmount(units('0.000000004'), 8), '0');
+  assert.equal(formatAmount(units('0.000000005'), 8), '0.00000001');
+  assert.equal(formatAmount(units('0.99999999999'), 8), '1');
+  assert.equal(formatAmount(units('8130081.300813008130081'), 8), '8130081.30081301');
+  assert.equal(formatAmount(units('146'), 2), '146');
+  assert.equal(formatAmount(0n, 8), '0');
+  // Средняя из примера с комиссией: 146 / 0.995.
+  assert.equal(formatAmount(pf([
+    buy('2026-01-01', 'Binance', '146', '146'),
+    transfer('2026-01-02', 'Binance', 'Кошелёк', '1', '0.995'),
+  ], 'Кошелёк').average, 2), '146.73');
 });
 
 test('невозможные операции дают ошибку, а не число', () => {

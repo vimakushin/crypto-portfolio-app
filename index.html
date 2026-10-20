@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Портфель</title>
+  <link rel="stylesheet" href="src/style.css">
+  <script type="module" src="src/app.js"></script>
+</head>
+<body>
+  <main>
+    <h1>Покупка</h1>
+
+    <form id="buy" novalidate>
+      <div class="field">
+        <label for="coin">Монета</label>
+        <input id="coin" name="coin" autocomplete="off" autocapitalize="characters" spellcheck="false"
+               placeholder="Например, SOL" enterkeyhint="next">
+        <div class="chips" id="coins"></div>
+        <p class="error" id="coin-error"></p>
+      </div>
+
+      <div class="field">
+        <label for="money">Потрачено, $</label>
+        <input id="money" name="money" inputmode="decimal" autocomplete="off" placeholder="Сколько потратили" enterkeyhint="next">
+        <p class="error" id="money-error"></p>
+      </div>
+
+      <div class="field">
+        <label for="price">Цена за монету, $</label>
+        <input id="price" name="price" inputmode="decimal" autocomplete="off" placeholder="По какой цене купили" enterkeyhint="done">
+        <p class="hint" id="quantity"></p>
+        <p class="error" id="price-error"></p>
+      </div>
+
+      <div class="field">
+        <span class="label" id="portfolio-label">Портфель</span>
+        <div class="chips" id="portfolios" role="group" aria-labelledby="portfolio-label"></div>
+        <input id="portfolio" name="portfolio" autocomplete="off" placeholder="Биржа или кошелёк, например Binance"
+               aria-labelledby="portfolio-label" hidden>
+        <p class="error" id="portfolio-error"></p>
+      </div>
+
+      <div class="field">
+        <div class="field-inline">
+          <label for="date">Дата</label>
+          <input id="date" name="date" type="date">
+        </div>
+        <p class="error" id="date-error"></p>
+      </div>
+
+      <button type="submit" class="primary">Записать покупку</button>
+      <p class="status" id="status" role="status"></p>
+    </form>
+  </main>
+</body>
+</html>

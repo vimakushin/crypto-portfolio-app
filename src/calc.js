@@ -29,6 +29,15 @@ function divide(a, b) {
   return (2n * a + b) / (2n * b);
 }
 
+// Число для показа человеку: округлено до ближайшего на digits знаков после
+// точки (digits от 1 до 30 — точнее числа не хранятся), нули в конце
+// убраны — «0.002», а не «0.00200000».
+export function formatAmount(units, digits) {
+  const text = divide(units, 10n ** BigInt(30 - digits)).toString().padStart(digits + 1, '0');
+  const fraction = text.slice(-digits).replace(/0+$/, '');
+  return fraction ? `${text.slice(0, -digits)}.${fraction}` : text.slice(0, -digits);
+}
+
 // --- Расчёт ---
 
 // Возвращает { coins, errors }.
@@ -83,8 +92,9 @@ function calculateCoin(operations) {
   return summarize(portfolios);
 }
 
-// Дата ГГГГ-ММ-ДД, которая есть в календаре.
-function isDate(text) {
+// Дата ГГГГ-ММ-ДД, которая есть в календаре. Ей пользуется и форма, чтобы
+// не записать дату, на которой расчёт потом остановится.
+export function isDate(text) {
   const parsed = new Date(`${text}T00:00:00Z`);
   return typeof text === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(text)
     && !isNaN(parsed) && parsed.toISOString().slice(0, 10) === text;
