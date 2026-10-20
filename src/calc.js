@@ -31,14 +31,40 @@ function divide(a, b) {
 
 // --- Расчёт ---
 
-// Возвращает Map: монета → { quantity, cost, average, portfolios },
+// Возвращает { coins, errors }.
+// coins — Map: монета → { quantity, cost, average, portfolios },
 // где portfolios — Map: портфель → { quantity, cost, average }.
 // Все числа — в единицах SCALE. Общие числа по монете — сумма портфелей,
 // поэтому общая средняя всегда равна средневзвешенной по портфелям.
+// errors — монеты, которые посчитать не удалось: { coin, operation, message },
+// где operation — та самая операция из входного списка, на которой расчёт
+// остановился.
 //
-// Если какая-то операция невозможна (продано больше, чем было, и т. п.),
-// бросает ошибку с описанием операции: неверная средняя хуже отсутствующей.
+// Монеты считаются независимо: данные вносятся руками месяцами, и битая
+// строка в истории одной монеты не должна оставлять человека с пустым
+// экраном. А внутри монеты ошибка останавливает её целиком: пропустить битую
+// покупку и посчитать остальное — значит показать неверную среднюю, а
+// неверная средняя хуже отсутствующей.
 export function calculate(operations) {
+  const byCoin = new Map();
+  for (const op of operations) {
+    if (!byCoin.has(op.coin)) byCoin.set(op.coin, []);
+    byCoin.get(op.coin).push(op);
+  }
+
+  const coins = new Map();
+  const errors = [];
+  for (const [coin, list] of byCoin) {
+    try {
+      coins.set(coin, calculateCoin(list));
+    } catch (error) {
+      errors.push({ coin, operation: error.operation, message: error.message });
+    }
+  }
+  return { coins, errors };
+}
+
+function calculateCoin(operations) {
   // Порядок операций влияет на результат: продажа снимает деньги по средней
   // на свой день. Купил по 100, продал всё, купил по 200 — средняя 200;
   // в другом порядке вышло бы 150. Операции вносят и задним числом, поэтому
@@ -48,30 +74,40 @@ export function calculate(operations) {
   // Шаблон отсекает «01.01.2026», календарь — «2026-13-45»: такая дата
   // встала бы в порядок операций между настоящими.
   for (const op of operations) {
-    const parsed = new Date(`${op.date}T00:00:00Z`);
-    const valid = typeof op.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(op.date)
-      && !isNaN(parsed) && parsed.toISOString().slice(0, 10) === op.date;
-    if (!valid) throw new Error(`Дата операции не существует или не в формате ГГГГ-ММ-ДД: «${op.date}»`);
+    if (!isDate(op.date)) fail(op, 'дата не существует или не в формате ГГГГ-ММ-ДД');
   }
   const ordered = [...operations].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 
-  const coins = new Map();
-  for (const op of ordered) apply(coins, op);
-  return summarize(coins);
+  const portfolios = new Map();
+  for (const op of ordered) apply(portfolios, op);
+  return summarize(portfolios);
 }
 
-function apply(coins, op) {
+// Дата ГГГГ-ММ-ДД, которая есть в календаре.
+function isDate(text) {
+  const parsed = new Date(`${text}T00:00:00Z`);
+  return typeof text === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(text)
+    && !isNaN(parsed) && parsed.toISOString().slice(0, 10) === text;
+}
+
+// Ошибка помнит операцию, чтобы экран мог показать, какая именно строка
+// мешает, а не только дату и монету.
+function fail(op, text) {
+  throw Object.assign(new Error(`Операция от ${op.date} (${op.coin}): ${text}`), { operation: op });
+}
+
+function apply(portfolios, op) {
   // Операции приходят и из загруженного файла, где поле может потеряться:
   // без этой проверки появился бы портфель «undefined» со своей средней.
   const names = op.type === 'transfer' ? [op.coin, op.from, op.to] : [op.coin, op.portfolio];
   if (!names.every((name) => typeof name === 'string' && name !== '')) {
-    throw new Error(`${describe(op)}: не указана монета или портфель`);
+    fail(op, 'не указана монета или портфель');
   }
 
   if (op.type === 'buy') {
     const money = amount(op, 'money');
     const price = amount(op, 'price');
-    const p = position(coins, op.coin, op.portfolio);
+    const p = position(portfolios, op.portfolio);
     // Количество не вводится, а считается: человек помнит «закинул 200
     // долларов», а не «купил 1.3687 SOL».
     p.quantity += divide(money * SCALE, price);
@@ -81,20 +117,20 @@ function apply(coins, op) {
     // Цена на среднюю не влияет: она нужна только, чтобы из денег получить
     // количество.
     if ((op.quantity === undefined) === (op.money === undefined)) {
-      throw new Error(`${describe(op)}: у продажи нужно указать либо количество, либо деньги`);
+      fail(op, `у продажи нужно указать либо количество, либо деньги`);
     }
     const quantity = op.quantity !== undefined
       ? amount(op, 'quantity')
       : divide(amount(op, 'money') * SCALE, amount(op, 'price'));
-    take(position(coins, op.coin, op.portfolio), quantity, op);
+    take(position(portfolios, op.portfolio), quantity, op);
   } else if (op.type === 'transfer') {
     if (op.from === op.to) {
-      throw new Error(`${describe(op)}: перевод в тот же портфель`);
+      fail(op, `перевод в тот же портфель`);
     }
     const sent = amount(op, 'sent');
     const received = amount(op, 'received');
     if (received > sent) {
-      throw new Error(`${describe(op)}: получено больше, чем отправлено`);
+      fail(op, `получено больше, чем отправлено`);
     }
     // Перевод — не сделка. Деньги переезжают вместе с монетами по средней
     // отправителя, и все они ложатся на полученные монеты. Комиссия сети
@@ -102,19 +138,19 @@ function apply(coins, op) {
     // столько же за то, что теперь имеет, поэтому средняя получателя и общая
     // растут. Списать комиссию в убыток и оставить среднюю прежней было бы
     // неверно. Без комиссии общая средняя не меняется вовсе.
-    const moved = take(position(coins, op.coin, op.from), sent, op);
-    const to = position(coins, op.coin, op.to);
+    const moved = take(position(portfolios, op.from), sent, op);
+    const to = position(portfolios, op.to);
     // Комиссия — разница между отправленным и полученным. Если «отправлено»
     // поправлено до всей позиции (см. DUST), получатель получает столько же
     // поправленное, иначе без комиссии монет стало бы больше, чем было.
     const arrived = moved.quantity - (sent - received);
     if (arrived <= 0n) {
-      throw new Error(`${describe(op)}: после комиссии до получателя ничего не дошло`);
+      fail(op, `после комиссии до получателя ничего не дошло`);
     }
     to.quantity += arrived;
     to.cost += moved.cost;
   } else {
-    throw new Error(`${describe(op)}: неизвестный вид операции «${op.type}»`);
+    fail(op, `неизвестный вид операции «${op.type}»`);
   }
 }
 
@@ -145,7 +181,7 @@ const DUST = 10n ** 4n;
 // монету, и его средняя упала бы ниже любой цены покупки.
 function take(p, quantity, op) {
   if (p.quantity === 0n || quantity > p.quantity + DUST) {
-    throw new Error(`${describe(op)}: в портфеле нет столько монет`);
+    fail(op, `в портфеле нет столько монет`);
   }
   if (p.quantity - quantity <= DUST) quantity = p.quantity;
   const cost = divide(p.cost * quantity, p.quantity);
@@ -154,11 +190,9 @@ function take(p, quantity, op) {
   return { quantity, cost };
 }
 
-function position(coins, coin, portfolio) {
-  if (!coins.has(coin)) coins.set(coin, new Map());
-  const byPortfolio = coins.get(coin);
-  if (!byPortfolio.has(portfolio)) byPortfolio.set(portfolio, { quantity: 0n, cost: 0n });
-  return byPortfolio.get(portfolio);
+function position(portfolios, name) {
+  if (!portfolios.has(name)) portfolios.set(name, { quantity: 0n, cost: 0n });
+  return portfolios.get(name);
 }
 
 // Числа в операциях — строки с точкой: «146.12». Строки, а не числа
@@ -166,30 +200,22 @@ function position(coins, coin, portfolio) {
 function amount(op, field) {
   const text = op[field];
   const match = typeof text === 'string' && /^(\d+)(?:\.(\d{1,30}))?$/.exec(text);
-  if (!match) throw new Error(`${describe(op)}: поле ${field} — не число: «${text}»`);
+  if (!match) fail(op, `поле ${field} — не число: «${text}»`);
   const value = BigInt(match[1] + (match[2] ?? '').padEnd(30, '0'));
-  if (value === 0n) throw new Error(`${describe(op)}: поле ${field} должно быть больше нуля`);
+  if (value === 0n) fail(op, `поле ${field} должно быть больше нуля`);
   return value;
 }
 
-function describe(op) {
-  return `Операция от ${op.date} (${op.coin})`;
-}
-
-function summarize(coins) {
-  const result = new Map();
-  for (const [coin, byPortfolio] of coins) {
-    const portfolios = new Map();
-    let quantity = 0n;
-    let cost = 0n;
-    for (const [name, p] of byPortfolio) {
-      portfolios.set(name, withAverage(p.quantity, p.cost));
-      quantity += p.quantity;
-      cost += p.cost;
-    }
-    result.set(coin, { ...withAverage(quantity, cost), portfolios });
+function summarize(positions) {
+  const portfolios = new Map();
+  let quantity = 0n;
+  let cost = 0n;
+  for (const [name, p] of positions) {
+    portfolios.set(name, withAverage(p.quantity, p.cost));
+    quantity += p.quantity;
+    cost += p.cost;
   }
-  return result;
+  return { ...withAverage(quantity, cost), portfolios };
 }
 
 // У опустевшей позиции средней нет — не ноль, а отсутствие числа.

@@ -25,7 +25,14 @@ const base = [
   buy('2026-02-01', 'Кошелёк', '50', '125'),
 ];
 
-const sol = (operations) => calculate(operations).get('SOL');
+const sol = (operations) => calculate(operations).coins.get('SOL');
+
+// Проверяет, что расчёт остановился ровно на одной монете с такой ошибкой.
+function fails(operations, message) {
+  const { errors } = calculate(operations);
+  assert.equal(errors.length, 1, `ожидалась одна ошибка, а их ${errors.length}`);
+  assert.match(errors[0].message, message);
+}
 const pf = (operations, name) => sol(operations).portfolios.get(name);
 
 test('покупки: средние на обоих уровнях сходятся с ручным счётом', () => {
@@ -180,7 +187,7 @@ test('граница пыли: лишние 10⁻²⁶ монеты — это �
   const all = [...base, sell('2026-03-01', 'Binance', { quantity: tail('1') })];
   assert.equal(pf(all, 'Binance').quantity, 0n);
   assert.equal(pf(all, 'Binance').cost, 0n);
-  assert.throws(() => calculate([...base, sell('2026-03-01', 'Binance', { quantity: tail('2') })]), /нет столько монет/);
+  fails([...base, sell('2026-03-01', 'Binance', { quantity: tail('2') })], /нет столько монет/);
   // Остаток в одну единицу NEAR (10⁻²⁴) настоящий, его порог не трогает.
   const near24 = [...base, sell('2026-03-01', 'Binance', { quantity: '2.999999999999999999999999' })];
   assert.equal(pf(near24, 'Binance').quantity, 10n ** 6n);
@@ -216,8 +223,30 @@ test('разные монеты считаются отдельно', () => {
     ...base,
     { type: 'buy', date: '2026-01-05', coin: 'BTC', portfolio: 'Binance', money: '1000', price: '50000' },
   ]);
-  near(result.get('BTC').average, 50000);
-  near(result.get('SOL').average, 2250, 17);
+  near(result.coins.get('BTC').average, 50000);
+  near(result.coins.get('SOL').average, 2250, 17);
+});
+
+test('битая операция одной монеты не мешает остальным и указывает на себя', () => {
+  const broken = sell('2026-03-01', 'Binance', { quantity: '99' });
+  const result = calculate([
+    { type: 'buy', date: '2026-01-05', coin: 'BTC', portfolio: 'Binance', money: '1000', price: '50000' },
+    ...base,
+    broken,
+    { type: 'buy', date: '2026-01-06', coin: 'ETH', portfolio: 'Кошелёк', money: '300', price: '3000' },
+  ]);
+  near(result.coins.get('BTC').average, 50000);
+  near(result.coins.get('ETH').average, 3000);
+  // SOL не показывается вовсе: средняя без битой строки была бы неверной.
+  assert.equal(result.coins.has('SOL'), false);
+  assert.equal(result.errors.length, 1);
+  assert.equal(result.errors[0].coin, 'SOL');
+  assert.equal(result.errors[0].operation, broken);
+  assert.match(result.errors[0].message, /2026-03-01.*нет столько монет/);
+});
+
+test('пустой список операций — пустой результат без ошибок', () => {
+  assert.deepEqual(calculate([]), { coins: new Map(), errors: [] });
 });
 
 test('очень дешёвая и очень дорогая монета считаются точно', () => {
@@ -265,12 +294,11 @@ test('история из тысячи разных операций счита�
     if (i % 4 === 3) operations.push(transfer(date, 'A', 'B', '0.1', '0.0997'));
   }
   const started = performance.now();
-  calculate(operations);
+  assert.deepEqual(calculate(operations).errors, []);
   assert.ok(performance.now() - started < 1000, 'расчёт занял больше секунды');
 });
 
 test('невозможные операции дают ошибку, а не число', () => {
-  const fails = (operations, message) => assert.throws(() => calculate(operations), message);
   fails([...base, sell('2026-03-01', 'Binance', { quantity: '3.0000001' })], /нет столько монет/);
   fails([...base, sell('2026-03-01', 'Ledger', { quantity: '0.1' })], /нет столько монет/);
   fails([...base, sell('2026-03-01', 'Ledger', { quantity: '0.000000000000000000000000000001' })], /нет столько монет/);
