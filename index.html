@@ -15,8 +15,11 @@
       <div class="field">
         <label for="coin">Монета</label>
         <input id="coin" name="coin" autocomplete="off" autocapitalize="characters" spellcheck="false"
-               placeholder="Например, SOL" enterkeyhint="next">
+               placeholder="Название или тикер, например SOL" enterkeyhint="next">
+        <p class="hint" id="coin-name"></p>
+        <div class="chips" id="found"></div>
         <div class="chips" id="coins"></div>
+        <p class="hint" id="coin-offline"></p>
         <p class="error" id="coin-error"></p>
       </div>
 
@@ -29,6 +32,7 @@
       <div class="field">
         <label for="price">Цена за монету, $</label>
         <input id="price" name="price" inputmode="decimal" autocomplete="off" placeholder="По какой цене купили" enterkeyhint="done">
+        <p class="hint" id="price-source"></p>
         <p class="hint" id="quantity"></p>
         <p class="error" id="price-error"></p>
       </div>
@@ -36,7 +40,7 @@
       <div class="field">
         <label for="received">Получено монет</label>
         <input id="received" name="received" inputmode="decimal" autocomplete="off"
-               placeholder="Если биржа взяла комиссию монетами" enterkeyhint="done">
+               placeholder="Если на бирже пришло меньше" enterkeyhint="done">
         <p class="hint" id="fee"></p>
         <p class="error" id="received-error"></p>
       </div>
@@ -59,7 +63,11 @@
 
       <button type="submit" class="primary">Записать покупку</button>
       <p class="status" id="status" role="status"></p>
+      <!-- Под кнопкой, а не над формой: появляясь, не сдвигает поля под пальцем. -->
+      <div id="unbound"></div>
     </form>
+
+    <p class="source">Цены — <a href="https://www.coingecko.com" target="_blank" rel="noopener">CoinGecko</a></p>
   </main>
 </body>
 </html>

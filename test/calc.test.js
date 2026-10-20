@@ -245,6 +245,23 @@ test('битая операция одной монеты не мешает ос
   assert.match(result.errors[0].message, /2026-03-01.*нет столько монет/);
 });
 
+test('монета без привязки не сливается с привязанной, даже с тем же тикером', () => {
+  const bound = { ...buy('2026-01-01', 'Binance', '100', '100'), coin: 'solana', symbol: 'SOL' };
+  const unbound1 = { ...buy('2026-01-02', 'Binance', '300', '150'), coin: null, symbol: 'SOL' };
+  const unbound2 = { ...buy('2026-01-03', 'Binance', '50', '125'), coin: null, symbol: 'SOL' };
+  const result = calculate([bound, unbound1, unbound2]);
+  near(result.coins.get('solana').average, 100);
+  assert.equal(result.coins.get('solana').quantity, exact(1));
+  // Две покупки без связи — одна монета «как её назвал человек»: 350 $ на 2.4.
+  near(result.coins.get('?SOL').average, 3500, 24);
+  assert.equal(result.coins.size, 2);
+});
+
+test('монета без привязки и без названия — ошибка, а не безымянная позиция', () => {
+  fails([{ ...buy('2026-01-01', 'Binance', '100', '100'), coin: null, symbol: '' }], /не указана монета/);
+  fails([{ ...buy('2026-01-01', 'Binance', '100', '100'), coin: null }], /не указана монета/);
+});
+
 test('пустой список операций — пустой результат без ошибок', () => {
   assert.deepEqual(calculate([]), { coins: new Map(), errors: [] });
 });

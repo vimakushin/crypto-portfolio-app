@@ -6,7 +6,7 @@
   --surface: #17201b;
   --border: #2a3830;
   --text: #e8f0eb;
-  --muted: #8ea398;
+  --muted: #a6b8ae;
   --brand: #3fcf8e;
   --brand-text: #06210f;
   --error: #ff9b7a;
@@ -90,8 +90,8 @@ input[aria-invalid='true'] {
   gap: 8px;
 }
 
-.chips:not(:empty) + input,
-input + .chips:not(:empty) {
+.chips:not(:empty),
+.chips:not(:empty) + input {
   margin-top: 8px;
 }
 
@@ -151,4 +151,26 @@ input + .chips:not(:empty) {
 .status {
   margin-top: 12px;
   font-size: 15px;
+}
+
+.notice {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.notice p {
+  margin: 0 0 8px;
+}
+
+.source {
+  margin-top: 24px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.source a {
+  color: inherit;
 }

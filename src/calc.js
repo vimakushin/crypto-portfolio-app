@@ -41,7 +41,7 @@ export function formatAmount(units, digits) {
 // --- Расчёт ---
 
 // Возвращает { coins, errors }.
-// coins — Map: монета → { quantity, cost, average, portfolios },
+// coins — Map: монета (см. coinKey) → { quantity, cost, average, portfolios },
 // где portfolios — Map: портфель → { quantity, cost, average }.
 // Все числа — в единицах SCALE. Общие числа по монете — сумма портфелей,
 // поэтому общая средняя всегда равна средневзвешенной по портфелям.
@@ -57,8 +57,9 @@ export function formatAmount(units, digits) {
 export function calculate(operations) {
   const byCoin = new Map();
   for (const op of operations) {
-    if (!byCoin.has(op.coin)) byCoin.set(op.coin, []);
-    byCoin.get(op.coin).push(op);
+    const key = coinKey(op);
+    if (!byCoin.has(key)) byCoin.set(key, []);
+    byCoin.get(key).push(op);
   }
 
   const coins = new Map();
@@ -71,6 +72,16 @@ export function calculate(operations) {
     }
   }
   return { coins, errors };
+}
+
+// Монета — это её код в источнике цен (op.coin, например «solana»), а не
+// тикер: у тикера SOL одиннадцать разных монет, и по тикеру однажды
+// подставилась бы цена чужой. Монета, внесённая без связи, кода не имеет
+// (coin: null) и считается под тем названием, что вписал человек (op.symbol),
+// отдельно от любой привязанной — даже с тем же тикером. Её ключ — «?SOL»:
+// в кодах источника вопросительного знака не бывает, и совпасть они не могут.
+export function coinKey(op) {
+  return op.coin === null ? `?${op.symbol}` : op.coin;
 }
 
 function calculateCoin(operations) {
@@ -103,13 +114,14 @@ export function isDate(text) {
 // Ошибка помнит операцию, чтобы экран мог показать, какая именно строка
 // мешает, а не только дату и монету.
 function fail(op, text) {
-  throw Object.assign(new Error(`Операция от ${op.date} (${op.coin}): ${text}`), { operation: op });
+  throw Object.assign(new Error(`Операция от ${op.date} (${op.symbol || op.coin || 'монета не указана'}): ${text}`), { operation: op });
 }
 
 function apply(portfolios, op) {
   // Операции приходят и из загруженного файла, где поле может потеряться:
   // без этой проверки появился бы портфель «undefined» со своей средней.
-  const names = op.type === 'transfer' ? [op.coin, op.from, op.to] : [op.coin, op.portfolio];
+  const coin = op.coin === null ? op.symbol : op.coin;
+  const names = op.type === 'transfer' ? [coin, op.from, op.to] : [coin, op.portfolio];
   if (!names.every((name) => typeof name === 'string' && name !== '')) {
     fail(op, 'не указана монета или портфель');
   }
