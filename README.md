@@ -2,6 +2,10 @@
 
 Tracks crypto holdings spread across several exchanges and wallets, with the average entry price for each portfolio and for each coin as a whole.
 
+**Open it:** https://vimakushin.github.io/crypto-portfolio-app/
+
+Work in progress: entries are lost when the page is reloaded, and the interface is in Russian only. See [Status](#status).
+
 ## The interesting part
 
 The hard part is not the interface. It is keeping the weighted average entry price correct when coins move between exchanges and wallets.
