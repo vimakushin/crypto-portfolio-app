@@ -174,3 +174,46 @@ input[aria-invalid='true'] {
 .source a {
   color: inherit;
 }
+
+/* Классы с display (например .chips) иначе перебили бы атрибут hidden. */
+[hidden] {
+  display: none !important;
+}
+
+.tabs {
+  margin: 0 0 16px;
+}
+
+.with-parts {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.with-parts input {
+  flex: 1;
+  min-width: 0;
+}
+
+.with-parts .chip {
+  flex: none;
+}
+
+#status:empty {
+  display: none;
+}
+
+/* Подтверждение — по строке на мысль. */
+#status {
+  margin: 0;
+  white-space: pre-line;
+}
+
+.undo {
+  margin-top: 10px;
+}
+
+.mirrored {
+  color: var(--muted);
+}
+

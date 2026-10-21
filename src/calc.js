@@ -38,6 +38,18 @@ export function formatAmount(units, digits) {
   return fraction ? `${text.slice(0, -digits)}.${fraction}` : text.slice(0, -digits);
 }
 
+// Число для показа по значащим цифрам. У цены около 1 $ и у дешёвой монеты
+// важны не центы, а первые цифры: с двумя знаками после точки рост средней
+// с 1 до 1.004 выглядел бы как «1 → 1», а цена 0.000000003 — как 0.
+// Шесть значащих: 125.313, 1.00402, 0.000000303.
+export function formatSignificant(units, digits) {
+  if (units === 0n) return '0';
+  const decimals = units >= SCALE
+    ? Math.max(1, digits - (units / SCALE).toString().length)
+    : Math.min(30, 30 - units.toString().length + digits);
+  return formatAmount(units, decimals);
+}
+
 // --- Расчёт ---
 
 // Возвращает { coins, errors }.
@@ -230,11 +242,17 @@ function position(portfolios, name) {
 
 // Числа в операциях — строки с точкой: «146.12». Строки, а не числа
 // JavaScript, потому что 0.1 в числе JavaScript уже неточное.
-function amount(op, field) {
-  const text = op[field];
+// Возвращает число в единицах SCALE или null, если это не число (запятая,
+// минус, буквы, больше 30 знаков после точки). Форма разбирает числа этой же
+// функцией, чтобы её подсказки не разошлись с расчётом.
+export function parseAmount(text) {
   const match = typeof text === 'string' && /^(\d+)(?:\.(\d{1,30}))?$/.exec(text);
-  if (!match) fail(op, `поле ${field} — не число: «${text}»`);
-  const value = BigInt(match[1] + (match[2] ?? '').padEnd(30, '0'));
+  return match ? BigInt(match[1] + (match[2] ?? '').padEnd(30, '0')) : null;
+}
+
+function amount(op, field) {
+  const value = parseAmount(op[field]);
+  if (value === null) fail(op, `поле ${field} — не число: «${op[field]}»`);
   if (value === 0n) fail(op, `поле ${field} должно быть больше нуля`);
   return value;
 }

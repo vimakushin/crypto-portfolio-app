@@ -9,35 +9,89 @@
 </head>
 <body>
   <main>
-    <h1>Покупка</h1>
+    <h1>Новая запись</h1>
 
-    <form id="buy" novalidate>
+    <!-- Поля трёх операций в одной форме: монета, цена и дата у них общие.
+         data-modes — при каких операциях поле видно. -->
+    <div class="chips tabs" role="group" aria-label="Вид операции">
+      <button type="button" class="chip" data-mode="buy">Покупка</button>
+      <button type="button" class="chip" data-mode="sell">Продажа</button>
+      <button type="button" class="chip" data-mode="transfer">Перевод</button>
+    </div>
+
+    <form id="operation" novalidate>
       <div class="field">
         <label for="coin">Монета</label>
         <input id="coin" name="coin" autocomplete="off" autocapitalize="characters" spellcheck="false"
-               placeholder="Название или тикер, например SOL" enterkeyhint="next">
+               placeholder="Название или тикер, например SOL" enterkeyhint="next" data-modes="buy">
+        <div class="chips" id="found" data-modes="buy"></div>
+        <div class="chips" id="coins" data-modes="buy"></div>
+        <div class="chips" id="held" data-modes="sell transfer"></div>
         <p class="hint" id="coin-name"></p>
-        <div class="chips" id="found"></div>
-        <div class="chips" id="coins"></div>
-        <p class="hint" id="coin-offline"></p>
+        <p class="hint" id="held-empty" data-modes="sell transfer"></p>
+        <p class="hint" id="coin-offline" data-modes="buy"></p>
         <p class="error" id="coin-error"></p>
       </div>
 
-      <div class="field">
+      <div class="field" data-modes="sell transfer">
+        <span class="label" id="from-label">Портфель</span>
+        <div class="chips" id="from" role="group" aria-labelledby="from-label"></div>
+        <p class="error" id="from-error"></p>
+      </div>
+
+      <div class="field" data-modes="transfer">
+        <span class="label" id="to-label">Куда</span>
+        <div class="chips" id="to" role="group" aria-labelledby="to-label"></div>
+        <input id="to-new" name="to-new" autocomplete="off" placeholder="Биржа или кошелёк, например Ledger"
+               aria-labelledby="to-label" hidden>
+        <p class="error" id="to-error"></p>
+      </div>
+
+      <div class="field" data-modes="buy">
         <label for="money">Потрачено, $</label>
         <input id="money" name="money" inputmode="decimal" autocomplete="off" placeholder="Сколько потратили" enterkeyhint="next">
         <p class="error" id="money-error"></p>
       </div>
 
-      <div class="field">
+      <div class="field" data-modes="sell">
+        <label for="sold">Продано монет</label>
+        <div class="with-parts">
+          <input id="sold" name="sold" inputmode="decimal" autocomplete="off" placeholder="Сколько" enterkeyhint="next">
+          <button type="button" class="chip" data-fill="sold" data-part="all">Всё</button>
+          <button type="button" class="chip" data-fill="sold" data-part="half">Половина</button>
+        </div>
+        <p class="hint" id="sold-have"></p>
+        <p class="error" id="sold-error"></p>
+      </div>
+
+      <div class="field" data-modes="transfer">
+        <label for="sent">Отправлено монет</label>
+        <div class="with-parts">
+          <input id="sent" name="sent" inputmode="decimal" autocomplete="off" placeholder="Сколько" enterkeyhint="done">
+          <button type="button" class="chip" data-fill="sent" data-part="all">Всё</button>
+          <button type="button" class="chip" data-fill="sent" data-part="half">Половина</button>
+        </div>
+        <p class="hint" id="sent-have"></p>
+        <p class="error" id="sent-error"></p>
+      </div>
+
+      <div class="field" data-modes="transfer">
+        <label for="moved">Получено монет</label>
+        <input id="moved" name="moved" inputmode="decimal" autocomplete="off" placeholder="Без комиссии — столько же"
+               enterkeyhint="done">
+        <p class="hint" id="moved-fee"></p>
+        <p class="error" id="moved-error"></p>
+      </div>
+
+      <div class="field" data-modes="buy sell">
         <label for="price">Цена за монету, $</label>
         <input id="price" name="price" inputmode="decimal" autocomplete="off" placeholder="По какой цене купили" enterkeyhint="done">
         <p class="hint" id="price-source"></p>
-        <p class="hint" id="quantity"></p>
+        <p class="hint" id="quantity" data-modes="buy"></p>
         <p class="error" id="price-error"></p>
       </div>
 
-      <div class="field">
+      <div class="field" data-modes="buy">
         <label for="received">Получено монет</label>
         <input id="received" name="received" inputmode="decimal" autocomplete="off"
                placeholder="Если на бирже пришло меньше" enterkeyhint="done">
@@ -45,7 +99,7 @@
         <p class="error" id="received-error"></p>
       </div>
 
-      <div class="field">
+      <div class="field" data-modes="buy">
         <span class="label" id="portfolio-label">Портфель</span>
         <div class="chips" id="portfolios" role="group" aria-labelledby="portfolio-label"></div>
         <input id="portfolio" name="portfolio" autocomplete="off" placeholder="Биржа или кошелёк, например Binance"
@@ -61,8 +115,12 @@
         <p class="error" id="date-error"></p>
       </div>
 
-      <button type="submit" class="primary">Записать покупку</button>
-      <p class="status" id="status" role="status"></p>
+      <p class="error" id="record-error"></p>
+      <button type="submit" class="primary" id="submit">Записать покупку</button>
+      <div class="status">
+        <p id="status" role="status"></p>
+        <button type="button" class="chip undo" id="undo" hidden>Отменить эту запись</button>
+      </div>
       <!-- Под кнопкой, а не над формой: появляясь, не сдвигает поля под пальцем. -->
       <div id="unbound"></div>
     </form>

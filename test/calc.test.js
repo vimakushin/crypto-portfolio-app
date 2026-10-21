@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { calculate, formatAmount, SCALE } from '../src/calc.js';
+import { calculate, formatAmount, formatSignificant, parseAmount, SCALE } from '../src/calc.js';
 
 // Ожидаемые значения посчитаны вручную и записаны дробями: near(x, 400, 3)
 // значит «x равно 400/3». Расчёт округляет деление в 30-м знаке, поэтому
@@ -118,6 +118,22 @@ test('продажа не меняет среднюю портфеля — ни 
   const byMoney = [...base, sell('2026-03-01', 'Binance', { money: '300', price: '150' })];
   near(pf(byMoney, 'Binance').quantity, 1);
   near(pf(byMoney, 'Binance').average, 400, 3);
+});
+
+test('продажа количеством с записанной ценой: цена на среднюю не влияет', () => {
+  // Форма хранит и цену продажи — для человека; расчёт её не использует.
+  const operations = [...base, sell('2026-03-01', 'Binance', { quantity: '1', price: '999' })];
+  near(pf(operations, 'Binance').quantity, 2);
+  near(pf(operations, 'Binance').average, 400, 3);
+});
+
+test('разбор числа: то же правило, что у расчёта', () => {
+  assert.equal(parseAmount('146.12'), exact(14612) / 100n);
+  assert.equal(parseAmount('0'), 0n);
+  assert.equal(parseAmount('1,5'), null);
+  assert.equal(parseAmount('-5'), null);
+  assert.equal(parseAmount(''), null);
+  assert.equal(parseAmount('1.' + '1'.repeat(31)), null);
 });
 
 test('продажа не меняет общую среднюю, когда монета лежит в одном портфеле', () => {
@@ -373,6 +389,19 @@ test('показ числа: округление до ближайшего и �
     buy('2026-01-01', 'Binance', '146', '146'),
     transfer('2026-01-02', 'Binance', 'Кошелёк', '1', '0.995'),
   ], 'Кошелёк').average, 2), '146.73');
+});
+
+test('показ по значащим цифрам: цена около 1 и дешёвая монета не теряют разницу', () => {
+  const units = (text) => parseAmount(text);
+  assert.equal(formatSignificant(units('125.3132832080200501'), 6), '125.313');
+  assert.equal(formatSignificant(units('1.004016064257'), 6), '1.00402');
+  assert.equal(formatSignificant(units('1'), 6), '1');
+  assert.equal(formatSignificant(units('0.000000303030303'), 6), '0.00000030303'); // 0.000000303030, ноль в конце убран
+  assert.equal(formatSignificant(units('0.000000004'), 6), '0.000000004');
+  assert.equal(formatSignificant(units('81632.4567'), 6), '81632.5');
+  assert.equal(formatSignificant(units('1234567.89'), 6), '1234567.9');
+  assert.equal(formatSignificant(units('0.9999999999'), 6), '1');
+  assert.equal(formatSignificant(0n, 6), '0');
 });
 
 test('невозможные операции дают ошибку, а не число', () => {

@@ -1,4 +1,4 @@
-import { calculate, formatAmount, isDate, SCALE } from './calc.js';
+import { calculate, coinKey, formatAmount, formatSignificant, isDate, parseAmount, SCALE } from './calc.js';
 import { fetchPrices, searchCoins } from './prices.js';
 
 // Внесённое пока живёт, пока открыта страница: хранилище появится вместе
@@ -10,6 +10,7 @@ const portfolios = [];
 // Монета — { id, symbol, name }. id — код в CoinGecko; у монеты, внесённой
 // без связи, его нет (null), и она хранится под тем тикером, что вписал человек.
 const coins = [];
+let mode = 'buy';
 let selectedCoin = null;
 let foundCoins = [];
 // Монету без выбора из списка можно записать без привязки в двух случаях:
@@ -22,10 +23,23 @@ let searchBusy = false;
 const canRecordUnbound = () => searchFailed || searchEmpty;
 // Цена подставлена из CoinGecko, а не вписана человеком.
 let priceAuto = false;
+// Покупка — портфель, куда купили. Продажа и перевод — откуда; перевод — куда.
 let selectedPortfolio = null;
 let addingPortfolio = false;
+let fromPortfolio = null;
+let toPortfolio = null;
+let addingTo = false;
+// «Всё» и «Половина» вписывают в поле число, округлённое для глаз, а
+// записывают точное: иначе после «продать всё» осталась бы пылинка или
+// пришёл бы отказ «нет столько монет». Если человек поправил число руками,
+// записывается то, что он вписал. Поле → { text, exact }.
+const presets = new Map();
+// «Получено» при переводе повторяет «отправлено», пока его не тронули.
+let movedTouched = false;
+// Последняя запись — её можно отменить: { operation }.
+let last = null;
 
-const form = document.getElementById('buy');
+const form = document.getElementById('operation');
 const input = {
   coin: document.getElementById('coin'),
   money: document.getElementById('money'),
@@ -33,6 +47,10 @@ const input = {
   received: document.getElementById('received'),
   portfolio: document.getElementById('portfolio'),
   date: document.getElementById('date'),
+  sold: document.getElementById('sold'),
+  sent: document.getElementById('sent'),
+  moved: document.getElementById('moved'),
+  to: document.getElementById('to-new'),
 };
 const text = (id, value) => { document.getElementById(id).textContent = value; };
 
@@ -54,41 +72,111 @@ function portfolioName(value) {
   return portfolios.find((known) => known.toLowerCase() === name.toLowerCase()) ?? name;
 }
 
-function isAmount(value) {
-  return /^\d+(\.\d{1,30})?$/.test(value) && /[1-9]/.test(value);
-}
+const isAmount = (value) => (parseAmount(value) ?? 0n) > 0n;
+// Количество — восемь знаков после точки, как на биржах; крошку меньше этого
+// показываем по значащим цифрам, а не нулём: «0 монет» было бы неправдой.
+const show = (units) => (units > 0n && formatAmount(units, 8) === '0' ? formatSignificant(units, 4) : formatAmount(units, 8));
+const showPrice = (units) => formatSignificant(units, 6);
+// Средняя изменилась на деле, а не на погрешность деления в 30-м знаке:
+// настоящая разница — даже комиссия 10⁻⁸ монеты — на много порядков больше.
+const changed = (before, after) => (after > before ? after - before : before - after) * 10n ** 15n > before;
+const averageChange = (before, after) =>
+  `${showPrice(before)} → ${showPrice(after)} $ (${after > before ? '+' : '−'}${percent(after > before ? after - before : before - after, before)})`;
+const showDate = (date) => date.split('-').reverse().join('.');
 
 const sameCoin = (a, b) => a.id === b.id && (a.id !== null || a.symbol === b.symbol);
+const keyOf = (coin) => coinKey({ coin: coin.id, symbol: coin.symbol });
 
-// Количество считает сам расчёт, по той же операции, что будет записана:
-// подсказки и то, что попадёт в портфель, не могут разойтись. null — расчёт
-// отказался: получено больше, чем куплено.
+// --- Что сейчас лежит ---
+// Всё берётся из расчёта по внесённым операциям: продать и перевести можно
+// только то, что расчёт видит в портфеле.
+
+const position = (coin) => calculate(operations).coins.get(keyOf(coin));
+const heldIn = (coin, portfolio) => position(coin)?.portfolios.get(portfolio)?.quantity ?? 0n;
+const heldCoins = () => coins.filter((coin) => (position(coin)?.quantity ?? 0n) > 0n);
+function heldPortfolios(coin) {
+  const found = position(coin);
+  return found ? [...found.portfolios].filter(([, p]) => p.quantity > 0n).map(([name]) => name) : [];
+}
+
+// Если монета лежит в одном портфеле, он выбран сразу.
+function pickFrom() {
+  const where = selectedCoin === null ? [] : heldPortfolios(selectedCoin);
+  fromPortfolio = where.length === 1 ? where[0] : where.includes(fromPortfolio) ? fromPortfolio : null;
+  if (toPortfolio === fromPortfolio) toPortfolio = null;
+}
+
+// --- Количество ---
+
+// Количество покупки считает сам расчёт, по той же операции, что будет
+// записана: подсказки и то, что попадёт в портфель, не могут разойтись.
+// null — расчёт отказался: получено больше, чем куплено.
 function quantityOf(money, price, received = '') {
   const op = { type: 'buy', date: today(), coin: '-', portfolio: '-', money, price };
   if (received) op.received = received;
   return calculate([op]).coins.get('-')?.quantity ?? null;
 }
 
-// Под ценой — сколько монет выходит. Если вписано полученное, вместо этого
-// под ним комиссия в монетах и процентах: опечатка вроде 0.1368 вместо 1.368
-// видна сразу как «комиссия 90%».
-function showQuantity() {
-  const money = normalize(input.money.value);
-  const price = normalize(input.price.value);
-  const received = normalize(input.received.value);
+function amountOf(field) {
+  const preset = presets.get(field);
+  return preset && preset.text === field.value ? preset.exact : normalize(field.value);
+}
+
+function setPreset(field, units) {
+  const shown = show(units);
+  presets.set(field, { text: shown, exact: formatAmount(units, 30) });
+  field.value = shown;
+}
+
+function clearPresets() {
+  for (const [field, preset] of presets) if (field.value === preset.text) field.value = '';
+  presets.clear();
+  if (!movedTouched) input.moved.value = input.sent.value;
+}
+
+// «Получено» при переводе: если его не трогали — столько же, сколько отправлено.
+const movedValue = () => (movedTouched && input.moved.value.trim() ? normalize(input.moved.value) : amountOf(input.sent));
+
+// Подсказки под полями. Покупка: сколько монет выходит, а если вписано
+// полученное — комиссия в монетах и процентах: опечатка вроде 0.1368 вместо
+// 1.368 видна сразу как «комиссия 90%». Продажа и перевод: сколько лежит в
+// портфеле. Перевод: комиссия сети, если «получено» меньше «отправлено».
+function showHints() {
   const symbol = selectedCoin?.symbol ?? (input.coin.value.trim().toUpperCase() || 'монет');
   let quantity = '';
   let fee = '';
-  if (isAmount(money) && isAmount(price)) {
+  const money = normalize(input.money.value);
+  const price = normalize(input.price.value);
+  const received = normalize(input.received.value);
+  if (mode === 'buy' && isAmount(money) && isAmount(price)) {
     const bought = quantityOf(money, price);
     const got = isAmount(received) ? quantityOf(money, price, received) : undefined;
-    if (got === undefined) quantity = `Количество: ${formatAmount(bought, 8)} ${symbol}`;
-    else if (got === null) fee = `Больше, чем ${formatAmount(bought, 8)} ${symbol} по этой цене`;
-    else fee = `Комиссия биржи: ${formatAmount(bought - got, 8)} ${symbol} (${formatAmount((bought - got) * 100n * SCALE / bought, 2)}%)`;
+    if (got === undefined) quantity = `Количество: ${show(bought)} ${symbol}`;
+    else if (got === null) fee = `Больше, чем ${show(bought)} ${symbol} по этой цене`;
+    else fee = `Комиссия биржи: ${show(bought - got)} ${symbol} (${percent(bought - got, bought)})`;
   }
   text('quantity', quantity);
   text('fee', fee);
+
+  const have = selectedCoin !== null && fromPortfolio !== null
+    ? `В ${fromPortfolio}: ${show(heldIn(selectedCoin, fromPortfolio))} ${symbol}` : '';
+  text('sold-have', mode === 'sell' ? have : '');
+  text('sent-have', mode === 'transfer' ? have : '');
+
+  let networkFee = '';
+  const sent = parseAmount(amountOf(input.sent));
+  const got = parseAmount(movedValue());
+  if (mode === 'transfer' && movedTouched && sent > 0n && got > 0n && got !== sent) {
+    networkFee = got > sent ? 'Получено больше, чем отправлено'
+      : `Комиссия сети: ${show(sent - got)} ${symbol} (${percent(sent - got, sent)})`;
+  }
+  text('moved-fee', networkFee);
+  // Подставленное «получено» бледнее набранного: видно, что это не ввод человека.
+  input.moved.classList.toggle('mirrored', !movedTouched);
 }
+
+// По значащим цифрам: рост средней на 0.0004% не должен выглядеть как «0%».
+const percent = (part, whole) => `${formatSignificant(part * 100n * SCALE / whole, 4)}%`;
 
 function moveToFront(list, item, same = (a, b) => a === b) {
   const index = list.findIndex((known) => same(known, item));
@@ -106,17 +194,87 @@ function chip(label, pressed, onClick) {
   return button;
 }
 
+// --- Вид операции ---
+
+const titles = { buy: 'покупку', sell: 'продажу', transfer: 'перевод' };
+
+// Каждая вкладка помнит свой выбор: заглянул в «Продажу» посреди покупки и
+// вернулся — монета и портфели на месте. Набранные числа живут в своих полях
+// и тоже остаются.
+const remembered = { buy: {}, sell: {}, transfer: {} };
+
+function setMode(next) {
+  remembered[mode] = { coin: selectedCoin, from: fromPortfolio, to: toPortfolio };
+  const previousCoin = selectedCoin;
+  mode = next;
+  ({ coin: selectedCoin = null, from: fromPortfolio = null, to: toPortfolio = null } = remembered[mode]);
+  for (const element of document.querySelectorAll('[data-modes]')) {
+    element.hidden = !element.dataset.modes.split(' ').includes(mode);
+  }
+  for (const button of document.querySelectorAll('[data-mode]')) {
+    button.setAttribute('aria-pressed', String(button.dataset.mode === mode));
+  }
+  text('submit', `Записать ${titles[mode]}`);
+  // Подтверждение прошлой записи под другой вкладкой читается как результат
+  // того, что вносишь сейчас, а «Отменить» рядом с ним отменило бы не то.
+  say('');
+  text('from-label', mode === 'transfer' ? 'Откуда' : 'Портфель');
+  input.price.placeholder = mode === 'sell' ? 'По какой цене продали' : 'По какой цене купили';
+  for (const element of form.querySelectorAll('.error')) element.textContent = '';
+  for (const field of Object.values(input)) field.removeAttribute('aria-invalid');
+  sanitize();
+  // Цена общая у покупки и продажи. Другая монета — другая цена: ни
+  // подставленная, ни вписанная руками на неё не переезжает.
+  if (selectedCoin !== previousCoin) {
+    input.price.value = '';
+    priceAuto = false;
+  }
+  render();
+  if (selectedCoin !== null) fillPrice();
+  else text('price-source', '');
+}
+
+// Выбор, который больше не верен, сбрасывается: продать и перевести можно
+// только то, что лежит, а портфель или монета могли исчезнуть после отмены.
+// Без этого запись тихо ушла бы в портфель, которого на экране нет.
+function sanitize() {
+  if (mode !== 'buy' && selectedCoin !== null && !heldCoins().some((coin) => sameCoin(coin, selectedCoin))) {
+    selectedCoin = null;
+  }
+  if (!portfolios.includes(toPortfolio)) toPortfolio = null;
+  if (!portfolios.includes(selectedPortfolio)) selectedPortfolio = portfolios[0] ?? null;
+  pickFrom();
+  if (mode === 'buy') {
+    // Текст в поле без выбранной монеты — снова ищем, иначе человек упрётся
+    // в «выберите из списка» без списка.
+    if (selectedCoin !== null) input.coin.value = selectedCoin.symbol;
+    else if (input.coin.value.trim()) searchLater();
+  }
+}
+
 // --- Монета ---
 
+// Покупка: монета из поиска или из недавних.
 function selectCoin(coin) {
   clearTimeout(searchTimer);
   selectedCoin = coin;
   foundCoins = [];
   input.coin.value = coin.symbol;
   setError('coin', '');
-  renderCoins();
+  render();
   fillPrice();
   input.money.focus();
+}
+
+// Продажа и перевод: монета из тех, что лежат.
+function selectHeld(coin) {
+  selectedCoin = coin;
+  clearPresets();
+  setError('coin', '');
+  pickFrom();
+  render();
+  fillPrice();
+  if (fromPortfolio !== null) (mode === 'sell' ? input.sold : input.sent).focus();
 }
 
 // Две разные монеты с одним тикером на кнопках подписаны названием, иначе
@@ -131,6 +289,12 @@ function renderCoins() {
   const pressed = (coin) => selectedCoin !== null && sameCoin(coin, selectedCoin);
   document.getElementById('coins').replaceChildren(...coins.map((coin) =>
     chip(coinLabel(coin), pressed(coin), () => selectCoin(coin))));
+  const held = heldCoins();
+  document.getElementById('held').replaceChildren(...held.map((coin) =>
+    chip(coinLabel(coin), pressed(coin), () => selectHeld(coin))));
+  text('held-empty', held.length > 0 ? ''
+    : mode === 'sell' ? 'Продавать пока нечего — сначала внесите покупку'
+    : 'Переводить пока нечего — сначала внесите покупку');
   // Поиск находит и похожие монеты: на «PEPE2» — PEPE. Если своей в списке
   // нет, человек явно выбирает «записать без цены», иначе пришлось бы
   // записать чужую монету.
@@ -141,14 +305,15 @@ function renderCoins() {
   document.getElementById('found').replaceChildren(...foundCoins.map((coin) =>
     chip(`${coin.symbol} · ${coin.name}`, false, () => selectCoin(coin))), ...notListed);
   text('coin-name', selectedCoin === null ? ''
-    : selectedCoin.id === null ? 'Текущей цены по этой монете нет — впишите цену сами. Какая это монета, спросим, когда найдём её в CoinGecko'
-    : selectedCoin.name);
+    : selectedCoin.id !== null ? selectedCoin.name
+    : mode === 'transfer' ? 'Монета без текущей цены'
+    : 'Текущей цены по этой монете нет — впишите цену сами. Какая это монета, спросим, когда найдём её в CoinGecko');
   text('coin-offline', searchBusy && selectedCoin === null
     ? 'CoinGecko просит подождать — попробуйте через минуту'
     : searchFailed && selectedCoin === null && input.coin.value.trim()
-    ? `Нет связи. Запишем как «${input.coin.value.trim().toUpperCase()}», а какая это монета — спросим, когда связь появится`
+    ? `Нет связи. Запишем как «${typed}», а какая это монета — спросим, когда связь появится`
     : searchEmpty && selectedCoin === null
-    ? `CoinGecko не знает такую монету. Запишем как «${input.coin.value.trim().toUpperCase()}» без текущей цены — когда она появится в справочнике, спросим, какая это`
+    ? `CoinGecko не знает такую монету. Запишем как «${typed}» без текущей цены — когда она появится в справочнике, спросим, какая это`
     : '');
 }
 
@@ -189,27 +354,27 @@ function searchLater() {
 
 // Цену подставляем текущую, человек соглашается или правит. Вписанную
 // человеком цену не трогаем; не удалось получить — пусто и честная подпись,
-// а не старое число.
+// а не старое число. У перевода цены нет.
 async function fillPrice() {
   if (priceAuto) input.price.value = '';
   priceAuto = false;
   const coin = selectedCoin;
-  if (coin.id === null) {
+  if (mode === 'transfer' || coin.id === null) {
     text('price-source', '');
-    showQuantity();
+    showHints();
     return;
   }
   // Цены на прошлые даты у нас нет, а сегодняшняя в старой сделке тихо
   // испортила бы среднюю.
   if (input.date.value !== today()) {
     text('price-source', 'Для прошлой даты впишите цену сделки');
-    showQuantity();
+    showHints();
     return;
   }
   text('price-source', 'Получаю текущую цену…');
   try {
     const price = (await fetchPrices([coin.id])).get(coin.id);
-    if (selectedCoin !== coin || input.date.value !== today()) return;
+    if (selectedCoin !== coin || input.date.value !== today() || mode === 'transfer') return;
     if (price === undefined) {
       text('price-source', 'CoinGecko не знает цену этой монеты — впишите цену сделки');
     } else if (input.price.value === '') {
@@ -223,7 +388,7 @@ async function fillPrice() {
   } catch {
     if (selectedCoin === coin) text('price-source', 'Текущую цену получить не удалось — впишите цену сделки');
   }
-  showQuantity();
+  showHints();
 }
 
 // --- Монеты без привязки к CoinGecko ---
@@ -272,21 +437,21 @@ function bind(unbound, coin) {
   }
   coins.splice(coins.indexOf(unbound), 1);
   if (!coins.some((known) => sameCoin(known, coin))) coins.push(coin);
-  renderCoins();
   if (selectedCoin === unbound) {
     selectedCoin = coin;
-    input.coin.value = coin.symbol;
-    renderCoins();
+    if (mode === 'buy') input.coin.value = coin.symbol;
     fillPrice();
   }
+  render();
   offerBinding();
-  text('status', `«${unbound.symbol}» привязана: ${coin.symbol} · ${coin.name}`);
+  // Привязка не отнимает отмену последней записи.
+  say(`«${unbound.symbol}» привязана: ${coin.symbol} · ${coin.name}`, last?.operation ?? null);
 }
 
-// --- Портфель ---
+// --- Портфели ---
 
 function renderPortfolios() {
-  // Пока портфелей нет, выбирать не из чего — сразу поле для названия.
+  // Покупка. Пока портфелей нет, выбирать не из чего — сразу поле для названия.
   const typing = addingPortfolio || portfolios.length === 0;
   input.portfolio.hidden = !typing;
   const chips = portfolios.map((name) => chip(name, !typing && name === selectedPortfolio, () => {
@@ -303,18 +468,66 @@ function renderPortfolios() {
     }));
   }
   document.getElementById('portfolios').replaceChildren(...chips);
+
+  // Продажа и перевод: откуда — только портфели, где монета лежит.
+  const where = selectedCoin === null ? [] : heldPortfolios(selectedCoin);
+  document.getElementById('from').replaceChildren(...where.map((name) => chip(name, name === fromPortfolio, () => {
+    if (name !== fromPortfolio) clearPresets();
+    fromPortfolio = name;
+    if (toPortfolio === name) toPortfolio = null;
+    setError('from', '');
+    render();
+    (mode === 'sell' ? input.sold : input.sent).focus();
+  })));
+
+  // Перевод: куда — любой другой портфель или новый.
+  const others = portfolios.filter((name) => name !== fromPortfolio);
+  const typingTo = addingTo || others.length === 0;
+  input.to.hidden = !typingTo;
+  const targets = others.map((name) => chip(name, !typingTo && name === toPortfolio, () => {
+    toPortfolio = name;
+    addingTo = false;
+    setError('to', '');
+    renderPortfolios();
+  }));
+  if (others.length > 0) {
+    targets.push(chip('+ Новый портфель', addingTo, () => {
+      addingTo = true;
+      renderPortfolios();
+      input.to.focus();
+    }));
+  }
+  document.getElementById('to').replaceChildren(...targets);
+}
+
+function render() {
+  renderCoins();
+  renderPortfolios();
+  showHints();
 }
 
 // --- Запись ---
 
 function setError(name, message) {
   text(`${name}-error`, message);
-  const field = name === 'portfolio' && input.portfolio.hidden ? null : input[name];
-  field?.setAttribute('aria-invalid', String(message !== ''));
+  input[name]?.setAttribute('aria-invalid', String(message !== ''));
 }
 
-form.addEventListener('submit', (event) => {
-  event.preventDefault();
+// Подтверждение записи. Отменить можно только последнюю запись — и только
+// пока на экране её подтверждение.
+function say(message, operation = null) {
+  text('status', message);
+  last = operation === null ? null : { operation };
+  document.getElementById('undo').hidden = last === null;
+}
+
+const coinOf = (op) => coins.find((coin) => keyOf(coin) === coinKey(op));
+
+// Каждая операция — покупка, продажа, перевод — собирается из полей своей
+// функцией: { problems, operation, describe }. describe(before, after)
+// пишет подтверждение по позиции монеты до и после записи.
+
+function readBuy(date) {
   const typed = input.coin.value.trim().toUpperCase();
   // Монету без выбора из списка принимаем только без связи или когда
   // справочник её не знает — и тогда без привязки. Иначе это было бы
@@ -324,10 +537,6 @@ form.addEventListener('submit', (event) => {
   const price = normalize(input.price.value);
   const received = normalize(input.received.value);
   const portfolio = input.portfolio.hidden ? selectedPortfolio : portfolioName(input.portfolio.value);
-  // Недонабранную дату поле отдаёт пустой; молча подставить сегодняшнюю
-  // значило бы записать не ту дату, что человек вводил.
-  const date = input.date.value;
-
   const problems = {
     coin: coin ? '' : typed ? 'Выберите монету из списка под полем' : 'Укажите монету',
     money: isAmount(money) ? '' : 'Нужно число больше нуля, например 200',
@@ -337,48 +546,211 @@ form.addEventListener('submit', (event) => {
       : isAmount(money) && isAmount(price) && quantityOf(money, price, received) === null
         ? 'Получено больше, чем потрачено ÷ цена. Проверьте цену и количество' : '',
     portfolio: portfolio ? '' : 'Укажите, где лежит монета',
+  };
+  if (Object.values(problems).some(Boolean)) return { problems };
+  const operation = { type: 'buy', date, coin: coin.id, symbol: coin.symbol, portfolio, money, price };
+  if (received) operation.received = received;
+  const auto = priceAuto;
+  return {
+    problems,
+    coin,
+    operation,
+    describe: () => `Записано: ${show(quantityOf(money, price, received))} ${coin.symbol} за ${money} $ по ${price} $` +
+      (auto ? ' (текущая по CoinGecko)' : '') + ` — ${portfolio}, ${showDate(date)}` +
+      (coin.id === null ? '. Без текущей цены: какая это монета, спросим, когда найдём её в CoinGecko' : ''),
+  };
+}
+
+function readSell(date) {
+  const coin = selectedCoin;
+  const sold = amountOf(input.sold);
+  const price = normalize(input.price.value);
+  const have = coin !== null && fromPortfolio !== null ? heldIn(coin, fromPortfolio) : 0n;
+  const problems = {
+    coin: coin ? '' : 'Выберите монету',
+    from: fromPortfolio ? '' : 'Выберите портфель, откуда продали',
+    sold: !isAmount(sold) ? 'Нужно число больше нуля, например 0.5'
+      : coin && fromPortfolio && parseAmount(sold) > have ? `В ${fromPortfolio} только ${show(have)} ${coin.symbol}` : '',
+    price: isAmount(price) ? '' : 'Нужно число больше нуля, например 146.12',
+  };
+  if (Object.values(problems).some(Boolean)) return { problems };
+  const from = fromPortfolio;
+  const auto = priceAuto;
+  return {
+    problems,
+    coin,
+    operation: { type: 'sell', date, coin: coin.id, symbol: coin.symbol, portfolio: from, quantity: sold, price },
+    describe: (before, after) => {
+      const wasAverage = before.portfolios.get(from).average;
+      const left = after.portfolios.get(from);
+      // По строке на мысль: что сделано, что в этом портфеле, что всего.
+      // Объяснение — рядом с числом, а не в конце абзаца: продал, а общая
+      // средняя выросла — без объяснения это выглядит как ошибка. Процента
+      // здесь нет: рядом со словом «продано» его читают как прибыль.
+      const lines = [`Продано ${show(parseAmount(sold))} ${coin.symbol} из ${from} по ${price} $` +
+        (auto ? ' (текущая по CoinGecko)' : '') + `, ${showDate(date)}.`];
+      lines.push(left.quantity === 0n ? `В ${from} ${coin.symbol} больше нет.`
+        : `В ${from} осталось ${show(left.quantity)} ${coin.symbol}, средняя там прежняя: ${showPrice(wasAverage)} $.`);
+      if (after.quantity > 0n) {
+        // Общая средняя может сдвинуться: изменилось, сколько монет в каком портфеле.
+        lines.push(`Всего ${coin.symbol}: ${show(after.quantity)}. Средняя по всем портфелям ` + (changed(before.average, after.average)
+          ? `${showPrice(before.average)} → ${showPrice(after.average)} $: монет стало меньше там, где они куплены по ${showPrice(wasAverage)} $, а в других портфелях они куплены по другой цене.`
+          : `не изменилась: ${showPrice(after.average)} $.`));
+      }
+      return lines.join('\n');
+    },
+  };
+}
+
+function readTransfer(date) {
+  const coin = selectedCoin;
+  const sent = amountOf(input.sent);
+  const received = movedValue();
+  const to = input.to.hidden ? toPortfolio : portfolioName(input.to.value);
+  const have = coin !== null && fromPortfolio !== null ? heldIn(coin, fromPortfolio) : 0n;
+  const problems = {
+    coin: coin ? '' : 'Выберите монету',
+    from: fromPortfolio ? '' : 'Выберите, откуда перевели',
+    to: !to ? 'Укажите, куда перевели' : to === fromPortfolio ? 'Это тот же портфель' : '',
+    sent: !isAmount(sent) ? 'Нужно число больше нуля, например 0.5'
+      : coin && fromPortfolio && parseAmount(sent) > have ? `В ${fromPortfolio} только ${show(have)} ${coin.symbol}` : '',
+    moved: !isAmount(received) ? 'Нужно число больше нуля, например 0.495'
+      : isAmount(sent) && parseAmount(received) > parseAmount(sent) ? 'Получено больше, чем отправлено' : '',
+  };
+  if (Object.values(problems).some(Boolean)) return { problems };
+  const from = fromPortfolio;
+  return {
+    problems,
+    coin,
+    operation: { type: 'transfer', date, coin: coin.id, symbol: coin.symbol, from, to, sent, received },
+    describe: (before, after) => {
+      const fee = parseAmount(sent) - parseAmount(received);
+      // Перевод — не сделка: без комиссии общая средняя та же, с комиссией —
+      // выше, потому что те же деньги теперь на меньшем числе монет.
+      return [
+        `Переведено ${show(parseAmount(sent))} ${coin.symbol}: ${from} → ${to}, ${showDate(date)}` +
+          (fee > 0n ? `, получено ${show(parseAmount(received))}` : '') + '.',
+        !changed(before.average, after.average)
+          ? `Средняя ${coin.symbol} по всем портфелям не изменилась: ${showPrice(after.average)} $.`
+          : `Средняя ${coin.symbol} по всем портфелям ${averageChange(before.average, after.average)}: сеть взяла ${show(fee)} ${coin.symbol}, а заплачено за них по-прежнему — те же деньги на меньшем числе монет.`,
+      ].join('\n');
+    },
+  };
+}
+
+// Перед записью операцию проверяет расчёт вместе со всеми остальными.
+// Внесённая задним числом продажа может оставить без монет более поздний
+// перевод — такую запись не принимаем и говорим, что она ломает.
+function brokenBy(operation) {
+  const key = coinKey(operation);
+  const error = calculate([...operations, operation]).errors.find((found) => found.coin === key);
+  if (!error) return '';
+  if (error.operation !== operation) return `Эта запись ломает более позднюю операцию — ${error.message}`;
+  // Текущий остаток форма уже проверила; раз расчёт всё же отказал — значит,
+  // на дату записи монет было меньше.
+  return /нет столько монет/.test(error.message)
+    ? `На ${showDate(operation.date)} в портфеле столько ${operation.symbol} ещё не было`
+    : error.message;
+}
+
+// Коротко, что это была за запись, — для сообщения об отмене.
+function shortName(op) {
+  if (op.type === 'buy') return `покупка ${op.symbol} на ${op.money} $ в ${op.portfolio}`;
+  if (op.type === 'sell') return `продажа ${show(parseAmount(op.quantity))} ${op.symbol} из ${op.portfolio}`;
+  return `перевод ${show(parseAmount(op.sent))} ${op.symbol}: ${op.from} → ${op.to}`;
+}
+
+form.addEventListener('submit', (event) => {
+  event.preventDefault();
+  // Недонабранную дату поле отдаёт пустой; молча подставить сегодняшнюю
+  // значило бы записать не ту дату, что человек вводил.
+  const date = input.date.value;
+  const read = { buy: readBuy, sell: readSell, transfer: readTransfer }[mode](date);
+  const problems = {
+    ...read.problems,
     date: !isDate(date) ? 'Укажите дату полностью' : date > today() ? 'Дата ещё не наступила' : '',
   };
   for (const [name, message] of Object.entries(problems)) setError(name, message);
+  text('record-error', '');
   const firstProblem = Object.keys(problems).find((name) => problems[name]);
+  // Подтверждение прошлой записи с кнопкой «Отменить» остаётся: ошибка в
+  // новой записи не повод терять отмену прошлой.
   if (firstProblem) {
-    text('status', '');
-    input[firstProblem].focus();
+    const field = input[firstProblem];
+    if (field && !field.hidden) field.focus();
+    else document.getElementById(`${firstProblem}-error`).scrollIntoView({ block: 'center' });
+    return;
+  }
+  const broken = brokenBy(read.operation);
+  if (broken) {
+    text('record-error', broken);
     return;
   }
 
-  const operation = { type: 'buy', date, coin: coin.id, symbol: coin.symbol, portfolio, money, price };
-  if (received) operation.received = received;
-  operations.push(operation);
-  moveToFront(portfolios, portfolio);
+  const coin = read.coin;
+  const before = position(coin);
+  operations.push(read.operation);
   moveToFront(coins, coin, sameCoin);
-  selectedPortfolio = portfolio;
-  addingPortfolio = false;
+  if (mode === 'buy') {
+    moveToFront(portfolios, read.operation.portfolio);
+    selectedPortfolio = read.operation.portfolio;
+    addingPortfolio = false;
+  }
+  if (mode === 'transfer' && !portfolios.includes(read.operation.to)) portfolios.push(read.operation.to);
+  say(read.describe(before, position(coin)), read.operation);
 
-  text('status',
-    `Записано: ${formatAmount(quantityOf(money, price, received), 8)} ${coin.symbol} за ${money} $ по ${price} $` +
-    (priceAuto ? ' (текущая по CoinGecko)' : '') + ' — ' +
-    `${portfolio}, ${date.split('-').reverse().join('.')}` +
-    (coin.id === null ? '. Без текущей цены: какая это монета, спросим, когда найдём её в CoinGecko' : ''));
-
-  // Дата возвращается к сегодняшней: иначе после одной старой покупки
-  // следующая, сегодняшняя, молча записалась бы задним числом.
-  input.money.value = '';
-  input.price.value = '';
-  input.received.value = '';
-  input.portfolio.value = '';
+  // Дата возвращается к сегодняшней: иначе после одной старой записи
+  // следующая, сегодняшняя, молча ушла бы задним числом.
+  clearPresets();
+  for (const field of [input.money, input.price, input.received, input.portfolio, input.sold, input.sent, input.moved, input.to]) {
+    field.value = '';
+  }
+  movedTouched = false;
+  addingTo = false;
+  toPortfolio = null;
   input.date.value = today();
   priceAuto = false;
-  renderPortfolios();
   document.activeElement.blur();
-  // Монета остаётся выбранной, и цена для следующей покупки подставляется
-  // заново — за минуту она могла измениться.
-  selectedCoin = coin;
-  input.coin.value = coin.symbol;
-  renderCoins();
-  showQuantity();
-  fillPrice();
-  if (coin.id === null) offerBinding();
+  // Монета остаётся выбранной, и цена для следующей записи подставляется
+  // заново — за минуту она могла измениться. Если продали всё, монеты
+  // больше нет среди тех, что можно продать.
+  selectedCoin = mode !== 'buy' && (position(coin)?.quantity ?? 0n) === 0n ? null : coin;
+  if (mode === 'buy') input.coin.value = coin.symbol;
+  pickFrom();
+  render();
+  if (selectedCoin !== null) fillPrice();
+  else text('price-source', '');
+  if (coin.id === null && mode === 'buy') offerBinding();
+});
+
+// Отмена последней записи. Безопасна всегда: возвращает к состоянию, которое
+// уже было проверено расчётом.
+document.getElementById('undo').addEventListener('click', () => {
+  const index = operations.indexOf(last?.operation);
+  if (index === -1) return;
+  const { operation } = last;
+  operations.splice(index, 1);
+  // Монета без цены, у которой не осталось записей, из списка уходит.
+  // Выбранной она тоже перестаёт быть — и здесь, и в запомненных вкладках.
+  for (const coin of coins.filter((known) => known.id === null && !operations.some((op) => coinOf(op) === known))) {
+    coins.splice(coins.indexOf(coin), 1);
+    if (selectedCoin !== null && sameCoin(selectedCoin, coin)) selectedCoin = null;
+    for (const choice of Object.values(remembered)) {
+      if (choice.coin && sameCoin(choice.coin, coin)) choice.coin = null;
+    }
+  }
+  // И портфель, заведённый этой записью, — тоже.
+  const used = new Set(operations.flatMap((op) => [op.portfolio, op.from, op.to]));
+  for (const name of portfolios.filter((known) => !used.has(known))) portfolios.splice(portfolios.indexOf(name), 1);
+  const previousCoin = selectedCoin;
+  sanitize();
+  if (selectedCoin !== previousCoin && priceAuto) {
+    input.price.value = '';
+    priceAuto = false;
+    text('price-source', '');
+  }
+  render();
+  say(`Отменено: ${shortName(operation)}, ${showDate(operation.date)}`);
 });
 
 // Enter в поле монеты без выбора из списка не уводит дальше: монету нужно
@@ -391,8 +763,8 @@ input.coin.addEventListener('keydown', (event) => {
 });
 
 // Enter на клавиатуре телефона ведёт к следующему полю, а в цене — записывает:
-// «получено» нужно редко и не должно стоять на пути обычной покупки.
-for (const [from, to] of [[input.coin, input.money], [input.money, input.price]]) {
+// «получено» нужно редко и не должно стоять на пути обычной записи.
+for (const [from, to] of [[input.coin, input.money], [input.money, input.price], [input.sold, input.price]]) {
   from.addEventListener('keydown', (event) => {
     if (event.key !== 'Enter') return;
     event.preventDefault();
@@ -400,12 +772,35 @@ for (const [from, to] of [[input.coin, input.money], [input.money, input.price]]
   });
 }
 
+for (const button of document.querySelectorAll('[data-mode]')) {
+  button.addEventListener('click', () => { if (button.dataset.mode !== mode) setMode(button.dataset.mode); });
+}
+
+// «Всё» и «Половина» — от того, что лежит в выбранном портфеле.
+for (const button of document.querySelectorAll('[data-fill]')) {
+  button.addEventListener('click', () => {
+    const name = button.dataset.fill;
+    if (selectedCoin === null || fromPortfolio === null) {
+      setError(name, 'Сначала выберите монету и портфель');
+      return;
+    }
+    const have = heldIn(selectedCoin, fromPortfolio);
+    setPreset(input[name], button.dataset.part === 'all' ? have : have / 2n);
+    setError(name, '');
+    if (name === 'sent' && !movedTouched) input.moved.value = input.sent.value;
+    showHints();
+  });
+}
+
 // Подставленную цену удобно заменить целиком: она выделяется при входе в поле.
 input.price.addEventListener('focus', () => { if (priceAuto) input.price.select(); });
 
 // Исправляемое поле перестаёт быть красным сразу, а не после следующей записи.
-for (const name of ['coin', 'money', 'price', 'received', 'portfolio', 'date']) {
-  input[name].addEventListener('input', () => setError(name, ''));
+for (const name of ['coin', 'money', 'price', 'received', 'portfolio', 'date', 'sold', 'sent', 'moved', 'to']) {
+  input[name].addEventListener('input', () => {
+    setError(name, '');
+    text('record-error', '');
+  });
 }
 input.coin.addEventListener('input', () => {
   selectedCoin = null;
@@ -424,20 +819,29 @@ input.coin.addEventListener('input', () => {
   text('price-source', '');
   searchLater();
   renderCoins();
-  showQuantity();
+  showHints();
 });
-input.money.addEventListener('input', showQuantity);
+input.money.addEventListener('input', showHints);
 input.price.addEventListener('input', () => {
   priceAuto = false;
   text('price-source', '');
-  showQuantity();
+  showHints();
 });
-input.received.addEventListener('input', showQuantity);
+input.received.addEventListener('input', showHints);
+input.sold.addEventListener('input', showHints);
+input.sent.addEventListener('input', () => {
+  if (!movedTouched) input.moved.value = input.sent.value;
+  showHints();
+});
+input.moved.addEventListener('input', () => {
+  // Стёрли — снова «столько же, сколько отправлено».
+  movedTouched = input.moved.value.trim() !== '';
+  showHints();
+});
 input.date.addEventListener('input', () => { if (selectedCoin !== null) fillPrice(); });
 window.addEventListener('online', offerBinding);
 
 // Календарь на телефоне не даст выбрать будущий день.
 input.date.max = today();
 input.date.value = today();
-renderCoins();
-renderPortfolios();
+setMode('buy');
