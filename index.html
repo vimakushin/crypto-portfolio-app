@@ -11,17 +11,27 @@
 </head>
 <body>
   <main>
-    <h1>Новая запись</h1>
+    <h1 id="title">Новая запись</h1>
+
+    <p class="hint" id="loading">Читаю сохранённое…</p>
+
+    <!-- Данные не целы: ничего не считаем и записи не принимаем. -->
+    <div class="notice alert" id="storage-broken" hidden role="alert">
+      <p><strong>Сохранённые данные не целы:</strong> <span id="storage-broken-reason"></span>.</p>
+      <p>Приложение не может им доверять: ничего по ним не считает и новые записи не принимает, чтобы не затереть то, что осталось.</p>
+      <p id="retry-box" hidden>Это может быть временный сбой связи: сохранённое при этом цело. Закройте и откройте приложение заново или прочитайте ещё раз.<br><button type="button" class="chip" id="retry">Прочитать заново</button></p>
+      <p id="reset-box">Если у вас есть файл с копией данных, загрузите его (внизу). Или сотрите сохранённое и начните заново: <strong>стирание необратимо</strong>.<br><button type="button" class="chip" id="reset">Стереть сохранённое и начать заново</button></p>
+    </div>
 
     <!-- Поля трёх операций в одной форме: монета, цена и дата у них общие.
          data-modes — при каких операциях поле видно. -->
-    <div class="chips tabs" role="group" aria-label="Вид операции">
+    <div class="chips tabs" id="modes" role="group" aria-label="Вид операции" hidden>
       <button type="button" class="chip" data-mode="buy">Покупка</button>
       <button type="button" class="chip" data-mode="sell">Продажа</button>
       <button type="button" class="chip" data-mode="transfer">Перевод</button>
     </div>
 
-    <form id="operation" novalidate>
+    <form id="operation" novalidate hidden>
       <div class="field">
         <label for="coin">Монета</label>
         <input id="coin" name="coin" autocomplete="off" autocapitalize="characters" spellcheck="false"
@@ -123,9 +133,30 @@
         <p id="status" role="status"></p>
         <button type="button" class="chip undo" id="undo" hidden>Отменить эту запись</button>
       </div>
+      <p class="hint" id="save-state" role="status"></p>
       <!-- Под кнопкой, а не над формой: появляясь, не сдвигает поля под пальцем. -->
       <div id="unbound"></div>
     </form>
+
+    <section class="data" id="data" aria-labelledby="data-title" hidden>
+      <h2 id="data-title">Данные</h2>
+      <p class="hint" id="data-info"></p>
+      <p class="hint" id="data-where"></p>
+      <div class="chips">
+        <button type="button" class="chip" id="export">Сохранить копию в файл</button>
+        <label class="chip" for="import-file">Загрузить из файла</label>
+        <input type="file" id="import-file" accept="application/json,.json" hidden>
+      </div>
+      <p class="hint" id="data-note" role="status"></p>
+      <p class="error" id="import-error" role="alert"></p>
+      <div class="notice" id="import-confirm" hidden>
+        <p id="import-summary"></p>
+        <div class="chips">
+          <button type="button" class="chip" id="import-cancel">Отмена</button>
+          <button type="button" class="chip danger" id="import-apply">Заменить мои данные</button>
+        </div>
+      </div>
+    </section>
 
     <p class="source">Цены — <a href="https://www.coingecko.com" target="_blank" rel="noopener">CoinGecko</a></p>
   </main>

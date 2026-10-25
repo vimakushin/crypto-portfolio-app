@@ -217,3 +217,33 @@ input[aria-invalid='true'] {
   color: var(--muted);
 }
 
+
+.data {
+  margin-top: 28px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.data h2 {
+  margin: 0 0 6px;
+  font-size: 18px;
+}
+
+label.chip {
+  cursor: pointer;
+}
+
+.chip:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* «Данные не целы» заметнее обычной подсказки: тут могут пропасть деньги. */
+.notice.alert {
+  border-color: var(--error);
+}
+
+.chip.danger {
+  border-color: var(--error);
+  color: var(--error);
+}

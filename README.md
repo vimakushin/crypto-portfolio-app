@@ -4,7 +4,7 @@ Tracks crypto holdings spread across several exchanges and wallets, with the ave
 
 **Open it:** https://vimakushin.github.io/crypto-portfolio-app/
 
-Work in progress: entries are lost when the page is reloaded, and the interface is in Russian only. See [Status](#status).
+Work in progress: entries are saved in the browser only, not in Telegram yet, and the interface is in Russian only. See [Status](#status).
 
 ## The interesting part
 
@@ -36,22 +36,24 @@ The rules have tests (`test/calc.test.js`):
 
 **If the calculation fails, nothing is shown for that coin.** A wrong average looks like any other number, and people rarely double-check it. An entry that cannot be applied (selling more than the portfolio holds, a date that does not exist) stops the calculation for that coin only, and the error names the entry that caused it. In the entry form, a backdated entry that would break a later one is refused before it is saved.
 
+**Incomplete data is reported, not calculated.** Entries are stored as the original records, not as results. The storage that Telegram offers takes at most 4096 characters per key and cannot write several keys at once, so the history is split into chunks, and a half-finished write must never become the current state. A save writes the new chunks under new keys first, then one manifest key (chunk count, entry count, SHA-256 of the whole text), and only then deletes the old chunks. If a write breaks off at any step, the manifest still points to the previous complete state. On reading, a missing chunk, a checksum that does not match, or a count that differs from the manifest means the data is incomplete: the app says so, shows no averages, and accepts no new entries that would overwrite what is left. The tests cut a save short at each write and check that what is read back is either the old state or the new one, never a mix. Two tabs saving at the same moment are not coordinated: one save wins and the other is lost whole, never half-applied.
+
 ## Status
 
 What works today, in a browser:
 
 - entering purchases, sales and transfers between portfolios, and undoing the last entry;
+- saving every change in the browser (local storage) and reading it back on reload, with the same averages;
+- exporting everything to a file and loading it back; a file with one bad entry is rejected whole, and the message names the entry;
 - the current price filled in from CoinGecko; the date, the last used portfolio and the coin quantity are also filled in or calculated;
 - the average entry price per portfolio and per coin, recalculated from the full history of entries. For now it is visible only in the confirmation after a sale (both levels) and after a transfer (the coin's overall average); a purchase confirmation does not show it yet;
 - working without a connection: everything except current prices and coin search. A coin entered offline is stored unlinked until it can be matched.
 
 Not done yet:
 
-- **entries are not saved**: they are lost when the page is closed or reloaded;
-- **it does not run in Telegram yet**, although that is the intended platform; storage will be tied to the user's Telegram account;
+- **it does not run in Telegram yet**, although that is the intended platform. The code that stores data in Telegram's cloud storage is written and tested against a fake that enforces Telegram's documented limits, but has never run against the real thing;
 - there is no main screen with positions and averages;
 - entries cannot be edited, only the last one undone;
-- no export to a file and import back;
 - the interface is in Russian only.
 
 ## Running it
@@ -70,7 +72,7 @@ Then open http://localhost:8765.
 npm test
 ```
 
-This runs Node's built-in test runner (tested with Node.js 22). The tests cover the calculation and the price module; the network is not used.
+This runs Node's built-in test runner (tested with Node.js 22). The tests cover the calculation, the price module, the storage layer (against a fake that enforces Telegram's limits) and file import; the network is not used. The page itself is not covered by automated tests.
 
 Prices: [CoinGecko](https://www.coingecko.com).
 

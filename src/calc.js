@@ -145,6 +145,7 @@ function apply(portfolios, op) {
     // Количество не вводится, а считается: человек помнит «закинул 200
     // долларов», а не «купил 1.3687 SOL».
     const bought = divide(money * SCALE, price);
+    if (bought === 0n) fail(op, 'на эту сумму по этой цене выходит меньше одной миллиардной доли миллиардной доли монеты');
     // Если биржа взяла комиссию монетами, пришло меньше. Тогда человек
     // вписывает, сколько получил, и правило то же, что у комиссии сети при
     // переводе: деньги не теряются, а ложатся на полученные монеты, и средняя
@@ -246,7 +247,7 @@ function position(portfolios, name) {
 // минус, буквы, больше 30 знаков после точки). Форма разбирает числа этой же
 // функцией, чтобы её подсказки не разошлись с расчётом.
 export function parseAmount(text) {
-  const match = typeof text === 'string' && /^(\d+)(?:\.(\d{1,30}))?$/.exec(text);
+  const match = typeof text === 'string' && /^(\d{1,30})(?:\.(\d{1,30}))?$/.exec(text);
   return match ? BigInt(match[1] + (match[2] ?? '').padEnd(30, '0')) : null;
 }
 
@@ -255,6 +256,70 @@ function amount(op, field) {
   if (value === null) fail(op, `поле ${field} — не число: «${op[field]}»`);
   if (value === 0n) fail(op, `поле ${field} должно быть больше нуля`);
   return value;
+}
+
+// --- Проверка операций из хранилища и из файла ---
+//
+// Операции приходят оттуда, где их мог испортить кто угодно: файл правят
+// руками, хранилище бывает недописано. Расчёт предполагает, что у операции
+// есть монета, а пустой элемент вместо операции роняет его целиком, поэтому
+// каждую проверяем до расчёта.
+
+// Какие поля бывают у операции каждого вида: обязательные и необязательные.
+const FIELDS = {
+  buy: { required: ['portfolio', 'money', 'price'], optional: ['received'] },
+  sell: { required: ['portfolio'], optional: ['quantity', 'money', 'price'] },
+  transfer: { required: ['from', 'to', 'sent', 'received'], optional: [] },
+};
+const COMMON = ['type', 'date', 'coin', 'symbol'];
+const NAMES = new Set(['portfolio', 'from', 'to', 'symbol']);
+
+// Пустая строка, если операция годится, иначе — что в ней не так.
+export function checkOperation(op) {
+  if (op === null || typeof op !== 'object' || Array.isArray(op)) return 'вместо записи там пусто или что-то другое';
+  const fields = Object.hasOwn(FIELDS, op.type) ? FIELDS[op.type] : null;
+  if (!fields) return `неизвестный вид операции «${op.type}»`;
+  const known = new Set([...COMMON, ...fields.required, ...fields.optional]);
+  const unknown = Object.keys(op).find((key) => !known.has(key));
+  if (unknown !== undefined) return `лишнее поле «${unknown}»`;
+  if (!isDate(op.date)) return `дата «${op.date}» не существует или не в формате ГГГГ-ММ-ДД`;
+  if (op.coin !== null && (typeof op.coin !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(op.coin))) return 'код монеты записан не так, как бывает у источника цен';
+  for (const name of [...COMMON.slice(3), ...fields.required.filter((field) => NAMES.has(field))]) {
+    if (typeof op[name] !== 'string' || op[name].trim() === '') return `не указано поле «${name}»`;
+  }
+  // Какие из числовых полей обязательны, зависит от вида; остальные — если есть.
+  const numbers = ['money', 'price', 'received', 'quantity', 'sent']
+    .filter((field) => op[field] !== undefined || fields.required.includes(field));
+  for (const field of numbers) {
+    const value = parseAmount(op[field]);
+    if (value === null) return `поле «${field}» — не число: «${op[field]}»`;
+    if (value === 0n) return `поле «${field}» должно быть больше нуля`;
+  }
+  if (op.type === 'sell' && (op.quantity === undefined) === (op.money === undefined)) {
+    return 'у продажи нужно указать либо количество, либо деньги';
+  }
+  if (op.type === 'sell' && op.quantity === undefined && op.price === undefined) return 'у продажи на сумму нет цены';
+  if (op.type === 'transfer' && op.from === op.to) return 'перевод в тот же портфель';
+  if (op.type === 'transfer' && parseAmount(op.received) > parseAmount(op.sent)) return 'получено больше, чем отправлено';
+  return '';
+}
+
+// Вся история разом: каждая операция сама по себе и все вместе. Возвращает
+// null, если всё хорошо, иначе { index, message } — номер операции (с нуля) и
+// что с ней не так. Пустой список — это не ошибка.
+export function checkHistory(operations) {
+  if (!Array.isArray(operations)) return { index: null, message: 'вместо списка операций что-то другое' };
+  for (const [index, op] of operations.entries()) {
+    const problem = checkOperation(op);
+    if (problem) return { index, message: problem };
+  }
+  const { errors } = calculate(operations);
+  if (errors.length > 0) {
+    // Расчёт останавливается на операции, с которой не сходится; при ошибке
+    // по дате или без операции index не определён, но сюда они не доходят.
+    return { index: operations.indexOf(errors[0].operation), message: errors[0].message.replace(/^Операция от [^:]*: /, '') };
+  }
+  return null;
 }
 
 function summarize(positions) {

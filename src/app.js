@@ -1,8 +1,9 @@
-import { calculate, coinKey, formatAmount, formatSignificant, isDate, parseAmount, SCALE } from './calc.js';
+import { calculate, checkHistory, coinKey, formatAmount, formatSignificant, isDate, parseAmount, SCALE } from './calc.js';
 import { fetchPrices, searchCoins } from './prices.js';
+import { createStore, makeExport, pickBackend, readExport } from './storage.js';
 
-// Внесённое пока живёт, пока открыта страница: хранилище появится вместе
-// с телеграмом, и последний портфель будет запоминаться там же.
+// Внесённые операции. Сохраняются после каждого изменения (см. «Хранение»
+// в конце файла); списки портфелей и монет ниже из них восстанавливаются.
 const operations = [];
 // Портфели и монеты в порядке использования: первый — самый свежий.
 // Последний портфель стоит первым и уже выбран — чаще всего покупают туда же.
@@ -446,6 +447,7 @@ function bind(unbound, coin) {
   offerBinding();
   // Привязка не отнимает отмену последней записи.
   say(`«${unbound.symbol}» привязана: ${coin.symbol} · ${coin.name}`, last?.operation ?? null);
+  persist();
 }
 
 // --- Портфели ---
@@ -698,6 +700,7 @@ form.addEventListener('submit', (event) => {
   }
   if (mode === 'transfer' && !portfolios.includes(read.operation.to)) portfolios.push(read.operation.to);
   say(read.describe(before, position(coin)), read.operation);
+  persist();
 
   // Дата возвращается к сегодняшней: иначе после одной старой записи
   // следующая, сегодняшняя, молча ушла бы задним числом.
@@ -751,6 +754,7 @@ document.getElementById('undo').addEventListener('click', () => {
   }
   render();
   say(`Отменено: ${shortName(operation)}, ${showDate(operation.date)}`);
+  persist();
 });
 
 // Enter в поле монеты без выбора из списка не уводит дальше: монету нужно
@@ -841,7 +845,274 @@ input.moved.addEventListener('input', () => {
 input.date.addEventListener('input', () => { if (selectedCoin !== null) fillPrice(); });
 window.addEventListener('online', offerBinding);
 
-// Календарь на телефоне не даст выбрать будущий день.
-input.date.max = today();
-input.date.value = today();
-setMode('buy');
+// --- Хранение ---
+//
+// Где лежат данные, приложение не знает: об этом заботится слой storage.js
+// (облако Телеграма внутри Телеграма, иначе localStorage). Здесь только:
+// прочитать при старте, сохранить после каждого изменения, выгрузить и
+// загрузить файл.
+
+const chosen = pickBackend(window);
+const store = chosen === null ? null : createStore(chosen.backend);
+const where = chosen?.kind === 'telegram' ? 'в облаке Телеграма' : 'в этом браузере';
+const byId = (id) => document.getElementById(id);
+const plural = (n, one, few, many) => (n % 10 === 1 && n % 100 !== 11 ? one
+  : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? few : many);
+const records = (n) => `${n} ${plural(n, 'запись', 'записи', 'записей')}`;
+
+// Названия монет нужны только для показа, но без них после перезагрузки
+// кнопки подписаны одним тикером.
+function snapshot() {
+  // Без прототипа: код монеты «__proto__» иначе тихо пропал бы при записи.
+  const names = Object.create(null);
+  for (const op of operations) {
+    if (op.coin !== null) names[op.coin] = coins.find((coin) => coin.id === op.coin)?.name || op.symbol;
+  }
+  return { operations, names };
+}
+
+// Списки портфелей и монет — производные от операций: первым стоит
+// последний использованный.
+function restore(state) {
+  operations.splice(0, operations.length, ...state.operations);
+  portfolios.length = 0;
+  coins.length = 0;
+  for (const op of operations) {
+    moveToFront(coins, op.coin === null
+      ? { id: null, symbol: op.symbol, name: '' }
+      : { id: op.coin, symbol: op.symbol, name: (state.names && Object.hasOwn(state.names, op.coin) ? state.names[op.coin] : null) || op.symbol }, sameCoin);
+    if (op.type === 'buy') moveToFront(portfolios, op.portfolio);
+    else for (const name of [op.portfolio, op.from, op.to]) if (name && !portfolios.includes(name)) portfolios.push(name);
+  }
+  selectedPortfolio = [...operations].reverse().find((op) => op.type === 'buy')?.portfolio ?? portfolios[0] ?? null;
+}
+
+// Всё, что человек успел выбрать и набрать, относилось к прежним данным.
+function resetView() {
+  selectedCoin = null;
+  foundCoins = [];
+  fromPortfolio = null;
+  toPortfolio = null;
+  addingPortfolio = false;
+  addingTo = false;
+  movedTouched = false;
+  priceAuto = false;
+  for (const key of Object.keys(remembered)) remembered[key] = {};
+  clearPresets();
+  for (const field of Object.values(input)) field.value = '';
+  input.date.value = today();
+  setMode(mode);
+}
+
+function showSaveState(kind, detail = '') {
+  const element = byId('save-state');
+  const failed = kind === 'failed' || kind === 'unavailable';
+  element.className = failed ? 'error' : 'hint';
+  element.textContent = {
+    saving: 'Сохраняю…',
+    saved: `Сохранено ${where}`,
+    failed: `Не удалось сохранить: ${detail}. Записи остались только на этой странице — выгрузите их в файл ниже.`,
+    unavailable: 'В этом браузере нельзя сохранять данные, и записи пропадут при закрытии страницы. Выгрузите их в файл ниже.',
+  }[kind];
+}
+
+function refreshDataPanel() {
+  byId('data-info').textContent = store === null ? `Данные не сохраняются. Сейчас на странице ${records(operations.length)}.`
+    : `Хранятся ${where}. Сейчас ${records(operations.length)}.`;
+  // Что «сохранено» на деле значит: на другом устройстве этого нет, а очистка
+  // браузера всё уберёт — единственная копия, которую человек держит сам, это файл.
+  byId('data-where').textContent = chosen?.kind === 'telegram'
+    ? 'Данные привязаны к вашему аккаунту Телеграма. Копия в файле — на случай, если что-то пойдёт не так.'
+    : 'Только на этом устройстве и в этом браузере: на другом их не будет, а очистка данных браузера их сотрёт. Копия в файле — единственная, которую вы держите сами.';
+  byId('export').disabled = operations.length === 0;
+}
+
+// Сохранение не задерживает ввод: записи идут по очереди в фоне, а исход
+// виден под кнопкой. Не сохранилось — это сказано прямо, запись при этом
+// остаётся на странице.
+let saveRun = 0;
+function persist() {
+  refreshDataPanel();
+  if (store === null) return showSaveState('unavailable');
+  const attempt = ++saveRun;
+  showSaveState('saving');
+  store.save(snapshot()).then(
+    () => { if (attempt === saveRun) showSaveState('saved'); },
+    (error) => { if (attempt === saveRun) showSaveState('failed', error.message); },
+  );
+}
+
+// Прочитанное проверяется так же, как загруженный файл: хранилище могли
+// изменить, а расчёт на испорченных данных дал бы неверные числа.
+function problemWith(state) {
+  const names = state.names ?? {};
+  if (names === null || typeof names !== 'object' || !Object.values(names).every((name) => typeof name === 'string')) {
+    return 'названия монет записаны не так, как нужно';
+  }
+  const problem = checkHistory(state.operations);
+  return problem === null ? '' : `запись №${(problem.index ?? -1) + 1}: ${problem.message}`;
+}
+
+// Данные не целы: ничего не считаем и ничего не принимаем — новая запись
+// затёрла бы то, что от них осталось. Выход: загрузить файл или стереть.
+function lockDown(reason, retry = false) {
+  byId('storage-broken-reason').textContent = reason;
+  byId('storage-broken').hidden = false;
+  byId('title').textContent = 'Данные';
+  byId('loading').hidden = true;
+  byId('data').hidden = false;
+  // Хранилище не ответило — данные могут быть целы, их надо прочитать заново,
+  // а не стирать. Стирание предлагаем, только когда ясно, что они повреждены.
+  byId('retry-box').hidden = !retry;
+  byId('reset-box').hidden = retry;
+  refreshDataPanel();
+  // Записей не ноль, а неизвестно сколько: «0 записей» здесь было бы неправдой.
+  byId('data-info').textContent = 'Сохранённое не прочитано, выгружать нечего.';
+  byId('export').disabled = true;
+}
+
+function unlock() {
+  byId('storage-broken').hidden = true;
+  byId('title').textContent = 'Новая запись';
+  byId('loading').hidden = true;
+  byId('data').hidden = false;
+  byId('modes').hidden = false;
+  form.hidden = false;
+}
+
+async function start() {
+  input.date.max = today();
+  input.date.value = today();
+  if (store === null) {
+    showSaveState('unavailable');
+  } else {
+    // Пока данные читаются, форма закрыта: запись поверх непрочитанного
+    // затёрла бы его.
+    const loaded = await store.load();
+    if (loaded.status === 'broken') return lockDown(loaded.reason, loaded.retry === true);
+    if (loaded.status === 'ok') {
+      const problem = problemWith(loaded.state);
+      if (problem) return lockDown(`сохранённые данные не проходят проверку (${problem})`);
+      restore(loaded.state);
+      showSaveState('saved');
+    }
+  }
+  setMode('buy');
+  unlock();
+  refreshDataPanel();
+  if (coins.some((coin) => coin.id === null)) offerBinding();
+}
+
+// Выгрузка в файл — то, что лежит на странице сейчас, в том же виде, что в
+// хранилище.
+byId('export').addEventListener('click', () => {
+  const link = document.createElement('a');
+  const url = URL.createObjectURL(new Blob([makeExport(snapshot())], { type: 'application/json' }));
+  link.href = url;
+  link.download = `crypto-portfolio-${today()}.json`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  const time = new Date().toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
+  byId('data-note').textContent = `Копия: ${link.download} (${records(operations.length)}), в ${time}. Если файл не скачался, копии нет.`;
+});
+
+// Загрузка: файл целиком проверяется, показывается, что в нём, и только по
+// второму нажатию заменяет текущие данные.
+let pendingImport = null;
+const importError = (message) => { byId('import-error').textContent = message; };
+
+byId('import-file').addEventListener('change', async (event) => {
+  const [file] = event.target.files;
+  event.target.value = '';
+  pendingImport = null;
+  byId('import-confirm').hidden = true;
+  form.inert = false;
+  importError('');
+  if (!file) return;
+  let content;
+  try {
+    content = await file.text();
+  } catch {
+    return importError('Файл не удалось прочитать');
+  }
+  const result = readExport(content);
+  if (!result.ok) return importError(`Файл не принят: ${result.message}. Ваши данные не тронуты.`);
+  pendingImport = result.state;
+  const dates = result.state.operations.map((op) => op.date).sort();
+  byId('import-summary').textContent = `В файле ${records(dates.length)}`
+    + (dates.length ? ` — с ${showDate(dates[0])} по ${showDate(dates.at(-1))}` : '')
+    + `. Ваши нынешние ${records(operations.length)} будут удалены и заменены ими — насовсем. Если сомневаетесь, сначала сохраните копию нынешних.`;
+  byId('import-confirm').hidden = false;
+  // Пока вопрос открыт, новая запись была бы затёрта заменой.
+  form.inert = true;
+});
+
+byId('import-cancel').addEventListener('click', () => {
+  pendingImport = null;
+  byId('import-confirm').hidden = true;
+  form.inert = false;
+});
+
+byId('import-apply').addEventListener('click', async () => {
+  if (pendingImport === null) return;
+  const state = pendingImport;
+  // Сначала сохраняем: не вышло — страница остаётся как была. Пока идёт
+  // запись, форма закрыта: операция, внесённая за это время, была бы затёрта.
+  if (store !== null) {
+    form.inert = true;
+    try {
+      await store.save(state);
+    } catch (error) {
+      return importError(`Не удалось сохранить загруженное: ${error.message}. Данные на странице не изменены.`);
+    } finally {
+      form.inert = false;
+    }
+  }
+  pendingImport = null;
+  byId('import-confirm').hidden = true;
+  importError('');
+  restore(state);
+  unlock();
+  resetView();
+  refreshDataPanel();
+  if (store !== null) showSaveState('saved');
+  say(`Загружено: ${records(state.operations.length)}`);
+  byId('data-note').textContent = `Загружено: ${records(state.operations.length)}. Прежние данные заменены.`;
+  if (coins.some((coin) => coin.id === null)) offerBinding();
+});
+
+// Стереть всё сохранённое — только когда данные не целы и другого выхода
+// нет. Два нажатия: первое только спрашивает.
+let resetArmed = false;
+byId('retry').addEventListener('click', () => location.reload());
+
+byId('reset').addEventListener('click', async () => {
+  const button = byId('reset');
+  if (!resetArmed) {
+    resetArmed = true;
+    button.textContent = 'Точно стереть? Нажмите ещё раз';
+    // Двойной тап — это один «нажал», а не два решения.
+    button.disabled = true;
+    setTimeout(() => { button.disabled = false; }, 1200);
+    setTimeout(() => { resetArmed = false; button.textContent = 'Стереть сохранённое и начать заново'; }, 6000);
+    return;
+  }
+  resetArmed = false;
+  button.textContent = 'Стереть сохранённое и начать заново';
+  try {
+    await store.erase();
+  } catch (error) {
+    byId('storage-broken-reason').textContent += `. Стереть не удалось: ${error.message}`;
+    return;
+  }
+  restore({ operations: [], names: {} });
+  unlock();
+  resetView();
+  refreshDataPanel();
+  showSaveState('saved');
+});
+
+// Что бы ни случилось при чтении, человек увидит причину, а не вечное «Читаю…».
+await start().catch((error) => lockDown(`приложение не смогло прочитать данные: ${error.message}`, true));
