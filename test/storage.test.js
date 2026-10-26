@@ -317,16 +317,53 @@ test('localStorage: свои ключи с приставкой, чужие не
   assert.deepEqual([...storage.map.keys()].sort(), ['other-app/x', 'чужое']);
 });
 
-test('выбор подкладки: Телеграм — только когда страница открыта в нём', () => {
+test('выбор подкладки: внутри Телеграма — облако, снаружи — localStorage', () => {
   const cloud = fakeCloud();
   const storage = fakeLocalStorage();
-  assert.equal(pickBackend({ Telegram: { WebApp: { initData: 'user=1', CloudStorage: cloud } }, localStorage: storage }).kind, 'telegram');
-  // Скрипт Телеграма подключён, но страница открыта в обычном браузере: initData пуст.
-  assert.equal(pickBackend({ Telegram: { WebApp: { initData: '', CloudStorage: cloud } }, localStorage: storage }).kind, 'browser');
+  const app = { CloudStorage: cloud, isVersionAtLeast: (version) => version === '6.9' };
+  assert.equal(pickBackend({ Telegram: { WebApp: app }, localStorage: storage }, true).kind, 'telegram');
+  // Скрипт Телеграма подключён, но решение «мы снаружи» принято раньше: localStorage.
+  assert.equal(pickBackend({ Telegram: { WebApp: app }, localStorage: storage }, false).kind, 'browser');
   assert.equal(pickBackend({ localStorage: storage }).kind, 'browser');
   assert.equal(pickBackend({}), null);
   const blocked = { setItem() { throw new Error('SecurityError'); }, removeItem() {} };
   assert.equal(pickBackend({ localStorage: blocked }), null);
+});
+
+test('внутри Телеграма без облака данные не уходят молча в localStorage', () => {
+  const storage = fakeLocalStorage();
+  // Версия ниже 6.9: облака нет — не «браузер», а отказ с причиной.
+  const old = { CloudStorage: fakeCloud(), isVersionAtLeast: () => false };
+  const oldVersion = pickBackend({ Telegram: { WebApp: old }, localStorage: storage }, true);
+  assert.equal(oldVersion.kind, 'unsupported');
+  assert.equal(oldVersion.backend, undefined);
+  assert.match(oldVersion.reason, /6\.9/);
+  // Скрипт Телеграма не подключился: выбор бросает, а не подставляет localStorage.
+  assert.throws(() => pickBackend({ localStorage: storage }, true), TypeError);
+});
+
+test('выбор подкладки не обращается к данным пользователя Телеграма (initData)', () => {
+  const app = { CloudStorage: fakeCloud(), isVersionAtLeast: () => true };
+  Object.defineProperty(app, 'initData', { get() { throw new Error('initData прочитан'); } });
+  Object.defineProperty(app, 'initDataUnsafe', { get() { throw new Error('initDataUnsafe прочитан'); } });
+  assert.equal(pickBackend({ Telegram: { WebApp: app }, localStorage: fakeLocalStorage() }, true).kind, 'telegram');
+});
+
+test('клиент Телеграма не отвечает: ошибка по сроку, а не вечное ожидание', async () => {
+  const silent = { getItem() {}, setItem() {}, removeItems() {}, getKeys() {} }; // колбэк так и не вызывается
+  const backend = telegramBackend(silent, 30);
+  await assert.rejects(backend.get('m'), /не ответил/);
+  await assert.rejects(backend.set('m', 'x'), /не ответил/);
+  const result = await createStore(backend).load();
+  assert.equal(result.status, 'broken');
+  assert.equal(result.retry, true);
+});
+
+test('версия ниже 6.9: вызов облака бросает сразу, и это ошибка, а не зависание', async () => {
+  const throwing = { getItem() { throw new Error('WebAppMethodUnsupported'); }, getKeys() { throw new Error('WebAppMethodUnsupported'); } };
+  const result = await createStore(telegramBackend(throwing)).load();
+  assert.equal(result.status, 'broken');
+  assert.match(result.reason, /WebAppMethodUnsupported/);
 });
 
 // --- Проверка операций (файл и хранилище) ---
@@ -542,7 +579,7 @@ test('части без главной записи (оборванная сам
   await telegramBackend(cloud).set('cabc123_0', 'x');
   const result = await loadFrom(cloud);
   assert.equal(result.status, 'broken');
-  assert.match(result.reason, /самой первой записи/);
+  assert.match(result.reason, /самая первая запись/);
 });
 
 test('вид операции с именем из прототипа не роняет проверку', () => {

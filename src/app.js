@@ -1,6 +1,7 @@
 import { calculate, checkHistory, coinKey, formatAmount, formatSignificant, isDate, parseAmount, SCALE } from './calc.js';
 import { fetchPrices, searchCoins } from './prices.js';
 import { createStore, makeExport, pickBackend, readExport } from './storage.js';
+import { insideTelegram, loadTelegram, telegramReady } from './telegram.js';
 
 // Внесённые операции. Сохраняются после каждого изменения (см. «Хранение»
 // в конце файла); списки портфелей и монет ниже из них восстанавливаются.
@@ -219,7 +220,7 @@ function setMode(next) {
   // Подтверждение прошлой записи под другой вкладкой читается как результат
   // того, что вносишь сейчас, а «Отменить» рядом с ним отменило бы не то.
   say('');
-  text('from-label', mode === 'transfer' ? 'Откуда' : 'Портфель');
+  text('from-label', mode === 'transfer' ? 'Откуда' : 'Портфель — биржа или кошелёк');
   input.price.placeholder = mode === 'sell' ? 'По какой цене продали' : 'По какой цене купили';
   for (const element of form.querySelectorAll('.error')) element.textContent = '';
   for (const field of Object.values(input)) field.removeAttribute('aria-invalid');
@@ -310,7 +311,7 @@ function renderCoins() {
     : mode === 'transfer' ? 'Монета без текущей цены'
     : 'Текущей цены по этой монете нет — впишите цену сами. Какая это монета, спросим, когда найдём её в CoinGecko');
   text('coin-offline', searchBusy && selectedCoin === null
-    ? 'CoinGecko просит подождать — попробуйте через минуту'
+    ? 'CoinGecko просит подождать. Поиск повторится сам примерно через минуту'
     : searchFailed && selectedCoin === null && input.coin.value.trim()
     ? `Нет связи. Запишем как «${typed}», а какая это монета — спросим, когда связь появится`
     : searchEmpty && selectedCoin === null
@@ -318,13 +319,16 @@ function renderCoins() {
     : '');
 }
 
-// Ищем, когда человек перестал печатать, а не на каждую букву: так
-// поиск монеты стоит один-два запроса, а не десяток.
+// Ищем, когда человек перестал печатать, а не на каждую букву. У CoinGecko
+// без ключа 5–15 запросов в минуту, и при наборе по знаку в 0,6 секунды
+// «solana» без этого стоило шесть запросов. Меньше двух знаков не ищем:
+// поиск по одной букве ничего полезного не даёт. Отказ (429) не конец:
+// подождав минуту, поиск повторяется сам, если человек всё ещё на этом слове.
 let searchTimer;
-function searchLater() {
+function searchLater(delay = 700) {
   clearTimeout(searchTimer);
   const query = input.coin.value.trim();
-  if (!query) {
+  if (query.length < 2) {
     foundCoins = [];
     renderCoins();
     return;
@@ -335,6 +339,8 @@ function searchLater() {
       if (input.coin.value.trim() !== query) return;
       foundCoins = found;
       searchEmpty = found.length === 0;
+      searchBusy = false;
+      searchFailed = false;
       // Связь есть — самое время спросить про монеты, внесённые без неё.
       // Один раз, а не после каждого поиска: каждое предложение — это запросы.
       // Для монет, которых нет в справочнике, предложений не бывает, и блок
@@ -346,9 +352,10 @@ function searchLater() {
       foundCoins = [];
       searchBusy = error.busy === true;
       searchFailed = !searchBusy;
+      if (searchBusy) searchLater(error.retryIn ?? 60_000);
     }
     renderCoins();
-  }, 400);
+  }, delay);
 }
 
 // --- Цена ---
@@ -372,22 +379,23 @@ async function fillPrice() {
     showHints();
     return;
   }
-  text('price-source', 'Получаю текущую цену…');
+  text('price-source', 'Получаю цену…');
   try {
     const price = (await fetchPrices([coin.id])).get(coin.id);
     if (selectedCoin !== coin || input.date.value !== today() || mode === 'transfer') return;
     if (price === undefined) {
-      text('price-source', 'CoinGecko не знает цену этой монеты — впишите цену сделки');
+      text('price-source', 'Цены этой монеты нет — впишите цену сделки');
     } else if (input.price.value === '') {
       input.price.value = price;
       priceAuto = true;
+      input.price.classList.add('mirrored');
       setError('price', '');
-      text('price-source', 'Текущая цена по CoinGecko — поправьте, если в сделке была другая');
+      text('price-source', 'Текущая цена. Исправьте, если была другая');
     } else {
       text('price-source', '');
     }
-  } catch {
-    if (selectedCoin === coin) text('price-source', 'Текущую цену получить не удалось — впишите цену сделки');
+  } catch (error) {
+    if (selectedCoin === coin) text('price-source', error.busy ? 'CoinGecko просит подождать — впишите цену' : 'Цену получить не удалось — впишите свою');
   }
   showHints();
 }
@@ -519,6 +527,7 @@ function setError(name, message) {
 // пока на экране её подтверждение.
 function say(message, operation = null) {
   text('status', message);
+  if (message) byId('status').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   last = operation === null ? null : { operation };
   document.getElementById('undo').hidden = last === null;
 }
@@ -796,6 +805,14 @@ for (const button of document.querySelectorAll('[data-fill]')) {
   });
 }
 
+// Enter в цене записывает покупку. Но если портфеля ещё нет и его надо
+// назвать, запись не пройдёт; пусть Enter сразу ведёт к его полю.
+input.price.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' || mode !== 'buy' || input.portfolio.hidden || input.portfolio.value.trim()) return;
+  event.preventDefault();
+  input.portfolio.focus();
+});
+
 // Подставленную цену удобно заменить целиком: она выделяется при входе в поле.
 input.price.addEventListener('focus', () => { if (priceAuto) input.price.select(); });
 
@@ -828,6 +845,7 @@ input.coin.addEventListener('input', () => {
 input.money.addEventListener('input', showHints);
 input.price.addEventListener('input', () => {
   priceAuto = false;
+  input.price.classList.remove('mirrored');
   text('price-source', '');
   showHints();
 });
@@ -852,9 +870,12 @@ window.addEventListener('online', offerBinding);
 // прочитать при старте, сохранить после каждого изменения, выгрузить и
 // загрузить файл.
 
-const chosen = pickBackend(window);
-const store = chosen === null ? null : createStore(chosen.backend);
-const where = chosen?.kind === 'telegram' ? 'в облаке Телеграма' : 'в этом браузере';
+// Выбираются в start(): внутри Телеграма сначала подключается его скрипт.
+let chosen = null;
+let store = null;
+// Почему сохранять нельзя, когда хранилища нет (store === null).
+let unavailableReason = '';
+const where = () => (chosen?.kind === 'telegram' ? 'в облаке Телеграма' : 'в этом браузере');
 const byId = (id) => document.getElementById(id);
 const plural = (n, one, few, many) => (n % 10 === 1 && n % 100 !== 11 ? one
   : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? few : many);
@@ -910,21 +931,26 @@ function showSaveState(kind, detail = '') {
   element.className = failed ? 'error' : 'hint';
   element.textContent = {
     saving: 'Сохраняю…',
-    saved: `Сохранено ${where}`,
+    saved: `Сохранено ${where()}`,
     failed: `Не удалось сохранить: ${detail}. Записи остались только на этой странице — выгрузите их в файл ниже.`,
-    unavailable: 'В этом браузере нельзя сохранять данные, и записи пропадут при закрытии страницы. Выгрузите их в файл ниже.',
+    unavailable: `${unavailableReason}: записи пропадут при закрытии страницы. Выгрузите их в файл ниже.`,
   }[kind];
 }
 
 function refreshDataPanel() {
   byId('data-info').textContent = store === null ? `Данные не сохраняются. Сейчас на странице ${records(operations.length)}.`
-    : `Хранятся ${where}. Сейчас ${records(operations.length)}.`;
+    : `Хранятся ${where()}. Сейчас ${records(operations.length)}.`;
   // Что «сохранено» на деле значит: на другом устройстве этого нет, а очистка
   // браузера всё уберёт — единственная копия, которую человек держит сам, это файл.
-  byId('data-where').textContent = chosen?.kind === 'telegram'
-    ? 'Данные привязаны к вашему аккаунту Телеграма. Копия в файле — на случай, если что-то пойдёт не так.'
-    : 'Только на этом устройстве и в этом браузере: на другом их не будет, а очистка данных браузера их сотрёт. Копия в файле — единственная, которую вы держите сами.';
+  // Записи из обычного браузера в облако сами не переезжают: это разные
+  // хранилища. Человеку только подсказываем, как их перенести, — ничего не
+  // подхватывается и не сливается молча.
+  byId('data-where').textContent = chosen === null ? ''
+    : chosen.kind === 'telegram'
+      ? `Данные привязаны к вашему аккаунту Телеграма.${operations.length === 0 ? ' Здесь пока пусто: если вы вели записи в браузере, сохраните там копию в файл и загрузите её здесь.' : ''} Копия в файле нужна на случай, если что-то пойдёт не так.`
+      : 'Только на этом устройстве, в этом браузере. На другом их не будет, очистка браузера их сотрёт. Копия в файле — ваша страховка.';
   byId('export').disabled = operations.length === 0;
+  if (operations.length === 0 && !byId('data-note').textContent) byId('data-note').textContent = 'В файл пока нечего сохранять: записей нет.';
 }
 
 // Сохранение не задерживает ввод: записи идут по очереди в фоне, а исход
@@ -956,15 +982,20 @@ function problemWith(state) {
 // Данные не целы: ничего не считаем и ничего не принимаем — новая запись
 // затёрла бы то, что от них осталось. Выход: загрузить файл или стереть.
 function lockDown(reason, retry = false) {
+  telegramReady(window);
   byId('storage-broken-reason').textContent = reason;
   byId('storage-broken').hidden = false;
-  byId('title').textContent = 'Данные';
+  byId('title').textContent = retry ? 'Новая запись' : 'Данные';
   byId('loading').hidden = true;
-  byId('data').hidden = false;
   // Хранилище не ответило — данные могут быть целы, их надо прочитать заново,
   // а не стирать. Стирание предлагаем, только когда ясно, что они повреждены.
+  // И пока не прочитали, загрузка файла была бы заменой вслепую: она затёрла
+  // бы то, что лежит в хранилище целым, — поэтому раздела «Данные» тут нет.
   byId('retry-box').hidden = !retry;
   byId('reset-box').hidden = retry;
+  byId('broken-text').hidden = retry;
+  byId('data').hidden = retry;
+  byId('storage-broken-title').textContent = retry ? 'Не удалось прочитать сохранённое:' : 'Сохранённые данные не целы:';
   refreshDataPanel();
   // Записей не ноль, а неизвестно сколько: «0 записей» здесь было бы неправдой.
   byId('data-info').textContent = 'Сохранённое не прочитано, выгружать нечего.';
@@ -972,6 +1003,7 @@ function lockDown(reason, retry = false) {
 }
 
 function unlock() {
+  telegramReady(window);
   byId('storage-broken').hidden = true;
   byId('title').textContent = 'Новая запись';
   byId('loading').hidden = true;
@@ -980,9 +1012,29 @@ function unlock() {
   form.hidden = false;
 }
 
+// Внутри Телеграма подключаем его скрипт и берём облако; снаружи — localStorage.
+async function connect() {
+  if (!insideTelegram(window)) return pickBackend(window, false);
+  await loadTelegram(window, document);
+  return pickBackend(window, true);
+}
+
 async function start() {
   input.date.max = today();
   input.date.value = today();
+  let picked;
+  try {
+    picked = await connect();
+  } catch (error) {
+    // Данные могут лежать в облаке целыми; молча писать в другое место нельзя.
+    return lockDown(`не удалось подключиться к Телеграму: ${error.message}`, true);
+  }
+  if (picked === null) unavailableReason = 'В этом браузере нельзя сохранять данные';
+  else if (picked.kind === 'unsupported') unavailableReason = picked.reason;
+  else {
+    chosen = picked;
+    store = createStore(picked.backend);
+  }
   if (store === null) {
     showSaveState('unavailable');
   } else {

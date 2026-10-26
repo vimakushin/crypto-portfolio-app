@@ -80,6 +80,7 @@ input[aria-invalid='true'] {
 
 .field-inline input {
   width: auto;
+  min-height: 44px;
   padding: 8px 10px;
   font-size: 16px;
 }
@@ -95,7 +96,9 @@ input[aria-invalid='true'] {
   margin-top: 8px;
 }
 
+/* Не ниже 44 пикселей: меньше пальцем легко промахнуться. */
 .chip {
+  min-height: 44px;
   padding: 8px 14px;
   border: 1px solid var(--border);
   border-radius: 999px;
@@ -246,4 +249,23 @@ label.chip {
 .chip.danger {
   border-color: var(--error);
   color: var(--error);
+}
+
+/* Подпись о цене приходит через секунду после выбора монеты. Место под неё
+   занято заранее: иначе она сдвигала бы кнопку «Записать» в тот момент, когда
+   палец уже тянется к ней. */
+#price-source {
+  display: block;
+  min-height: 1.5em;
+}
+
+/* Три вида операции — в один ряд на любой ширине, включая самую узкую. */
+.tabs {
+  flex-wrap: nowrap;
+}
+
+.tabs .chip {
+  flex: 1;
+  padding-inline: 4px;
+  text-align: center;
 }

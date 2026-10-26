@@ -4,7 +4,7 @@ Tracks crypto holdings spread across several exchanges and wallets, with the ave
 
 **Open it:** https://vimakushin.github.io/crypto-portfolio-app/
 
-Work in progress: entries are saved in the browser only, not in Telegram yet, and the interface is in Russian only. See [Status](#status).
+Work in progress: the Telegram Mini App support is written but has not been run inside Telegram yet, and the interface is in Russian only. See [Status](#status).
 
 ## The interesting part
 
@@ -24,7 +24,11 @@ The rules have tests (`test/calc.test.js`):
 
 ## Decisions behind it
 
-**The data belongs to the user.** There is no server of its own and no separate account. The only outgoing requests are for current prices and coin search, sent directly from the user's device to the CoinGecko public API.
+**The data belongs to the user.** There is no server of its own and no separate account. The only requests that leave the device are for current prices and coin search, sent directly to the CoinGecko public API (CoinGecko sees the coin ids and the search text). Opened inside Telegram, the page also loads Telegram's own script from telegram.org, and the history is saved in Telegram's cloud storage instead of the browser; opened in an ordinary browser, it does not contact telegram.org at all.
+
+**It keeps its CoinGecko requests to a minimum.** As of October 2026, CoinGecko's [support page](https://support.coingecko.com/hc/en-us/articles/4538771776153-What-is-the-rate-limit-for-CoinGecko-API-public-plan) lists the keyless public API at 5 to 15 calls per minute, depending on global load, and its [rate-limit error documentation](https://docs.coingecko.com/docs/common-errors-rate-limit.md) says the limit is counted per IP address and that failed requests count too. These are CoinGecko's figures, not ours; in one test of ours the first 429 came after five calls in a row. So prices for all coins in the list are requested in one call and kept for a minute; search results are kept for ten; a search starts only after the typing pauses and needs at least two characters; and after a 429 the app sends nothing for a minute, then retries the search by itself if the query has not changed. In a scripted test, typing "solana" one character every 0.6 seconds sent six searches with the earlier 0.4-second pause; with the current 0.7-second pause it sends one.
+
+**It uses nothing from Telegram except the cloud storage.** Telegram hands a Mini App the user's name and id (`initData`). The app does not use, keep or send it (Telegram's own script holds it for the tab). To tell whether the page is running inside Telegram before Telegram's script is loaded, the app checks only whether two launch parameter names are present (in the address, or in what Telegram's script saved for the tab) and whether the channel Telegram uses to talk to the page exists. It does not use the values.
 
 **It does not ask for exchange API keys, seed phrases or private keys.** Holdings are entered by hand. Connecting to exchanges would mean storing its users' access keys, and that was ruled out from the start.
 
@@ -51,10 +55,14 @@ What works today, in a browser:
 
 Not done yet:
 
-- **it does not run in Telegram yet**, although that is the intended platform. The code that stores data in Telegram's cloud storage is written and tested against a fake that enforces Telegram's documented limits, but has never run against the real thing;
+- **it has not been run inside Telegram yet.** The code is written: it is meant to detect Telegram, load its script only then, and keep the data in Telegram's cloud storage. It is tested against a fake of the cloud storage that enforces the documented limits. Four things the storage code assumes about the real cloud (what an absent key returns, that a write is confirmed with `true`, whether the 4096 limit counts bytes or characters, whether the cloud holds foreign keys) are not in Telegram's documentation. Neither are the launch parameters the detection relies on, and that is unverified too. `telegram-check.html` checks all of it against the real thing when opened from a bot; until it has been run, they are assumptions;
 - there is no main screen with positions and averages;
 - entries cannot be edited, only the last one undone;
 - the interface is in Russian only.
+
+## Checking Telegram's cloud storage
+
+`telegram-check.html` runs the checks listed under Status on the real cloud storage, also exercises the whole storage layer and times the calls, and prints what it found, including which Telegram signs it saw. Point a bot's Mini App address at it, open it from Telegram, and copy the result. It uses keys starting with `x-chk-` (a prefix the app's own keys cannot have) and removes them at the end; if a run is cut short, the next run removes the leftovers. It does not modify the app's own data (it only lists key names) and does not read the user's name or id.
 
 ## Running it
 

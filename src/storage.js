@@ -162,7 +162,7 @@ async function load(backend) {
     if (manifestText === null) {
       const orphans = (await backend.keys()).filter(isChunkKey);
       return orphans.length === 0 ? { status: 'empty' }
-        : { status: 'broken', reason: 'найдены части данных, но нет главной записи о них (так бывает, если страницу закрыли во время самой первой записи — тогда терять нечего, кроме неё)' };
+        : { status: 'broken', reason: 'найдены части данных, но нет главной записи о них (если это самая первая запись, оборванная при закрытии страницы, потеряна только она; если нет — данные повреждены)' };
     }
 
     let manifest;
@@ -251,9 +251,17 @@ export function localBackend(storage, prefix = 'crypto-portfolio-app/') {
 }
 
 // Облако Телеграма: колбэки «ошибка первым аргументом», как в документации.
-export function telegramBackend(cloud) {
+// Клиент может не ответить вовсе (связь, закрытый канал); без срока ожидания
+// приложение зависло бы на чтении. Не ответил — это ошибка, а исход записи
+// при этом неизвестен: так её и разбирает слой выше.
+export function telegramBackend(cloud, timeoutMs = 15000) {
   const call = (method, ...args) => new Promise((resolve, reject) => {
-    cloud[method](...args, (error, result) => (error ? reject(new Error(String(error))) : resolve(result)));
+    const timer = setTimeout(() => reject(new Error('Телеграм не ответил')), timeoutMs);
+    cloud[method](...args, (error, result) => {
+      clearTimeout(timer);
+      if (error) reject(new Error(String(error)));
+      else resolve(result);
+    });
   });
   const confirmed = (result) => {
     if (result !== true) throw new Error('Телеграм не подтвердил запись');
@@ -266,11 +274,20 @@ export function telegramBackend(cloud) {
   };
 }
 
-// Телеграм — если страница открыта в нём (initData не пуст) и облако есть;
-// иначе localStorage; если и его нет (закрыт настройками браузера) — null.
-export function pickBackend(scope) {
-  const app = scope.Telegram?.WebApp;
-  if (app?.initData && app.CloudStorage) return { kind: 'telegram', backend: telegramBackend(app.CloudStorage) };
+// Внутри Телеграма (inTelegram — это решает telegram.js) данные лежат только
+// в его облаке: если облака нет, молча писать в localStorage его браузера
+// нельзя — потом, когда облако появится, записи «пропали бы». Вне Телеграма —
+// localStorage; если и его нет (закрыт настройками браузера) — null.
+// Данные пользователя Телеграма (initData) здесь не трогаем.
+export function pickBackend(scope, inTelegram = false) {
+  if (inTelegram) {
+    // Скрипт Телеграма не подключился — бросит, и start() покажет причину.
+    const app = scope.Telegram.WebApp;
+    if (!app.isVersionAtLeast('6.9')) {
+      return { kind: 'unsupported', reason: 'Эта версия Телеграма не умеет хранить данные в облаке (нужна 6.9 или новее) — обновите Телеграм' };
+    }
+    return { kind: 'telegram', backend: telegramBackend(app.CloudStorage) };
+  }
   try {
     const probe = 'crypto-portfolio-app/probe';
     scope.localStorage.setItem(probe, '1');

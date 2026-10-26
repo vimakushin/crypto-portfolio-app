@@ -17,9 +17,9 @@
 
     <!-- Данные не целы: ничего не считаем и записи не принимаем. -->
     <div class="notice alert" id="storage-broken" hidden role="alert">
-      <p><strong>Сохранённые данные не целы:</strong> <span id="storage-broken-reason"></span>.</p>
-      <p>Приложение не может им доверять: ничего по ним не считает и новые записи не принимает, чтобы не затереть то, что осталось.</p>
-      <p id="retry-box" hidden>Это может быть временный сбой связи: сохранённое при этом цело. Закройте и откройте приложение заново или прочитайте ещё раз.<br><button type="button" class="chip" id="retry">Прочитать заново</button></p>
+      <p><strong id="storage-broken-title">Сохранённые данные не целы:</strong> <span id="storage-broken-reason"></span>.</p>
+      <p id="broken-text">Приложение не может им доверять: ничего по ним не считает и новые записи не принимает, чтобы не затереть то, что осталось.</p>
+      <p id="retry-box" hidden>Ничего не изменено, сохранённое могло остаться целым: просто не получилось до него достучаться. Закройте и откройте приложение заново или прочитайте ещё раз.<br><button type="button" class="chip" id="retry">Прочитать заново</button></p>
       <p id="reset-box">Если у вас есть файл с копией данных, загрузите его (внизу). Или сотрите сохранённое и начните заново: <strong>стирание необратимо</strong>.<br><button type="button" class="chip" id="reset">Стереть сохранённое и начать заново</button></p>
     </div>
 
@@ -35,7 +35,7 @@
       <div class="field">
         <label for="coin">Монета</label>
         <input id="coin" name="coin" autocomplete="off" autocapitalize="characters" spellcheck="false"
-               placeholder="Название или тикер, например SOL" enterkeyhint="next" data-modes="buy">
+               placeholder="Название или тикер" enterkeyhint="next" data-modes="buy">
         <div class="chips" id="found" data-modes="buy"></div>
         <div class="chips" id="coins" data-modes="buy"></div>
         <div class="chips" id="held" data-modes="sell transfer"></div>
@@ -52,9 +52,9 @@
       </div>
 
       <div class="field" data-modes="transfer">
-        <span class="label" id="to-label">Куда</span>
+        <span class="label" id="to-label">Куда (биржа или кошелёк)</span>
         <div class="chips" id="to" role="group" aria-labelledby="to-label"></div>
-        <input id="to-new" name="to-new" autocomplete="off" placeholder="Биржа или кошелёк, например Ledger"
+        <input id="to-new" name="to-new" autocomplete="off" placeholder="Например, Ledger"
                aria-labelledby="to-label" hidden>
         <p class="error" id="to-error"></p>
       </div>
@@ -104,17 +104,17 @@
       </div>
 
       <div class="field" data-modes="buy">
-        <label for="received">Получено монет</label>
+        <label for="received">Получено монет (только если пришло меньше)</label>
         <input id="received" name="received" inputmode="decimal" autocomplete="off"
-               placeholder="Если на бирже пришло меньше" enterkeyhint="done">
+               placeholder="Необязательно" enterkeyhint="done">
         <p class="hint" id="fee"></p>
         <p class="error" id="received-error"></p>
       </div>
 
       <div class="field" data-modes="buy">
-        <span class="label" id="portfolio-label">Портфель</span>
+        <span class="label" id="portfolio-label">Портфель — биржа или кошелёк</span>
         <div class="chips" id="portfolios" role="group" aria-labelledby="portfolio-label"></div>
-        <input id="portfolio" name="portfolio" autocomplete="off" placeholder="Биржа или кошелёк, например Binance"
+        <input id="portfolio" name="portfolio" autocomplete="off" placeholder="Например, Binance"
                aria-labelledby="portfolio-label" hidden>
         <p class="error" id="portfolio-error"></p>
       </div>
