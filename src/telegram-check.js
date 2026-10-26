@@ -168,11 +168,45 @@ async function diagnose(cloud, text) {
 
 // Номер сборки страницы: Телеграм на телефоне может показать старую копию из кэша,
 // и по этой строке в присланном тексте видно, какая версия на самом деле работала.
-const BUILD = 'повторы-3';
+const BUILD = 'повторы-4';
 
 // Один и тот же кусок слоя пишется много раз подряд под разными ключами, и отдельно
 // — короткие значения с обратными косыми. Если зависания случайны, они будут и у
 // одинаковых значений; если зависает только содержимое, то каждый раз одно и то же.
+// Проверка догадки «клиент ограничивает частоту записей»: 200 записей одного
+// значения, нечётные — с паузой в полсекунды перед записью, чётные — сразу после
+// предыдущей. Если причина в частоте, отказы будут почти только у чётных.
+// У каждого отказа печатаем, сколько записей было за предыдущую секунду и пять.
+async function pacing(cloud, chunk) {
+  const starts = [];
+  const classes = { 'без паузы': { hung: 0, slow: 0, total: 0 }, 'с паузой 0,5 с': { hung: 0, slow: 0, total: 0 } };
+  const events = [];
+  for (let index = 0; index < 200; index++) {
+    const paused = index % 2 === 1;
+    const kind = paused ? 'с паузой 0,5 с' : 'без паузы';
+    if (paused) await pause(500);
+    const key = `${PREFIX}pace${index}`;
+    const now = performance.now();
+    const inSecond = starts.filter((t) => now - t < 1000).length;
+    const inFive = starts.filter((t) => now - t < 5000).length;
+    starts.push(now);
+    const call = await rawCall(cloud, 'setItem', key, chunk);
+    const number = made;
+    classes[kind].total++;
+    if (accepted(call)) {
+      if (call.ms > 1000) { classes[kind].slow++; events.push(`№${number} ${kind}: МЕДЛЕННО ${Math.round(call.ms)} мс, записей за 1 с / 5 с до того: ${inSecond}/${inFive}`); }
+    } else {
+      classes[kind].hung++;
+      await pause(2000);
+      const back = await rawCall(cloud, 'getItem', key);
+      events.push(`№${number} ${kind}: НЕТ ОТВЕТА (${succeeded(back) && back.result === chunk ? 'значение лежит' : 'пусто'}), записей за 1 с / 5 с до того: ${inSecond}/${inFive}`);
+    }
+  }
+  log(`      200 записей куска слоя (4096 байт):`);
+  for (const [kind, c] of Object.entries(classes)) log(`        ${kind}: не ответили ${c.hung} из ${c.total}, дольше секунды ${c.slow}`);
+  for (const line of events) log(`        ${line}`);
+}
+
 async function repeats(cloud, text) {
   log();
   log('    ПОВТОРЫ: одно и то же значение несколько раз подряд (принято/нет ответа)');
@@ -199,9 +233,9 @@ async function repeats(cloud, text) {
     log(`      ${label} (${bytes(value)} байт) ×${times}: не ответили ${hung}, дольше секунды ${slow}`);
     log(`        (№ — номер вызова за сеанс; мс или НЕТ): ${results.join(' ')}`);
   };
-  await outcomes('кусок слоя, который в прошлый раз прошёл и повис', chunk, 100);
+  await pacing(cloud, chunk);
   for (const count of [1, 10, 100, 500, 2048]) await outcomes(`обратных косых: ${count}`, '\\'.repeat(count), 3);
-  await rawCall(cloud, 'removeItems', Array.from({ length: 100 }, (_, index) => `${PREFIX}rep${index}`));
+  await rawCall(cloud, 'removeItems', Array.from({ length: 200 }, (_, index) => `${PREFIX}pace${index}`));
 }
 
 // Пять частей слоя по очереди и пять разом, раунды вперемешку. Если облако
