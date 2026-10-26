@@ -162,6 +162,30 @@ async function diagnose(cloud, text) {
   await rawCall(cloud, 'removeItems', [`${PREFIX}probe`]);
 }
 
+// Номер сборки страницы: Телеграм на телефоне может показать старую копию из кэша,
+// и по этой строке в присланном тексте видно, какая версия на самом деле работала.
+const BUILD = 'повторы-1';
+
+// Один и тот же кусок слоя пишется много раз подряд под разными ключами, и отдельно
+// — короткие значения с обратными косыми. Если зависания случайны, они будут и у
+// одинаковых значений; если зависает только содержимое, то каждый раз одно и то же.
+async function repeats(cloud, text) {
+  log();
+  log('    ПОВТОРЫ: одно и то же значение несколько раз подряд (принято/нет ответа)');
+  const chunk = splitByBytes(text, 4096)[0];
+  const outcomes = async (label, value, times) => {
+    const results = [];
+    for (let index = 0; index < times; index++) {
+      const call = await rawCall(cloud, 'setItem', `${PREFIX}rep${index}`, value);
+      results.push(accepted(call) ? `${Math.round(call.ms)}` : 'НЕТ');
+    }
+    log(`      ${label} (${bytes(value)} байт) ×${times}: ${results.join(' ')} мс`);
+  };
+  await outcomes('кусок слоя, который в прошлый раз прошёл и повис', chunk, 20);
+  for (const count of [1, 10, 100, 500, 2048]) await outcomes(`обратных косых: ${count}`, '\\'.repeat(count), 3);
+  await rawCall(cloud, 'removeItems', Array.from({ length: 20 }, (_, index) => `${PREFIX}rep${index}`));
+}
+
 async function run() {
   if (!insideTelegram(window)) {
     document.getElementById('verdict').textContent = 'Приложение не узнало Телеграм';
@@ -178,6 +202,7 @@ async function run() {
   const cloud = app.CloudStorage;
 
   log('СРЕДА');
+  log(`    сборка страницы проверки: ${BUILD}`);
   log(`    Телеграм: версия Bot API ${app.version}, платформа ${app.platform}`);
   log(`    версия 6.9 или новее: ${app.isVersionAtLeast('6.9')}`);
   log(`    окно: ${window.innerWidth}×${window.innerHeight}, масштаб ${window.devicePixelRatio}`);
@@ -272,6 +297,7 @@ async function run() {
     printTrace(trace);
     await diagnose(cloud, realText);
   }
+  await repeats(cloud, realText);
   // Что бы ни случилось, слой после себя убирает; на всякий случай — ещё раз.
   const strays = ((await rawCall(cloud, 'getKeys')).result ?? []).filter((key) => key.startsWith(PREFIX));
   if (strays.length > 0) await rawCall(cloud, 'removeItems', strays);
