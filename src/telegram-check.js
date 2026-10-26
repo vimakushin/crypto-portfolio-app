@@ -168,44 +168,69 @@ async function diagnose(cloud, text) {
 
 // Номер сборки страницы: Телеграм на телефоне может показать старую копию из кэша,
 // и по этой строке в присланном тексте видно, какая версия на самом деле работала.
-const BUILD = 'повторы-5';
+const BUILD = 'повторы-6';
 
 // Один и тот же кусок слоя пишется много раз подряд под разными ключами, и отдельно
 // — короткие значения с обратными косыми. Если зависания случайны, они будут и у
 // одинаковых значений; если зависает только содержимое, то каждый раз одно и то же.
 // 200 записей одного значения подряд под новыми ключами. Прошлый прогон показал:
-// частота записей ни при чём (с паузой и без отказы те же), а зависшие записи
-// после срока лежат в облаке — теряется подтверждение, а не запись. Теперь
-// выясняем, КОГДА запись ложится: если ответа нет уже 0,6 с, читаем ключ и
-// смотрим, лежит ли значение. Лежит — подтверждение просто опаздывает, и срок
-// можно ставить коротким: перечитав ключ, мы узнаем исход; нет — запись ещё в
-// пути, и оборванная запись может лечь позже следующей.
-async function pacing(cloud, chunk) {
+// частота записей ни при чём, а зависшие записи после срока лежат в облаке —
+// теряется подтверждение или запись опаздывает. Теперь выясняем, КОГДА она
+// ложится. Если на запись нет ответа 0,6 с, каждые 0,4 с читаем ключ (чтения не
+// зависали ни разу) и записываем, между какими чтениями значение появилось.
+//   ПРЕДСКАЗАНИЕ владельца (записано до прогона): мост роняет запрос, клиент
+//   переотправляет его раз в ~2 с, значит значение появится около 2 с, а не сразу.
+//   Альтернатива: значение уже лежит на 0,6 с, теряется только подтверждение.
+//   Если значения появляются сразу — короткий срок безопасен; если около 2, 4, 6 с
+//   — оборванная запись ещё в пути, и срок или перечитывание должны это пережить.
+async function pacing(cloud, chunk, total = 200, gap = 0, label = '') {
   const events = [];
-  const counts = { hung: 0, slow: 0, early: 0, notYet: 0 };
-  for (let index = 0; index < 200; index++) {
-    const key = `${PREFIX}pace${index}`;
+  const landings = [];
+  const counts = { hung: 0, slow: 0, never: 0 };
+  for (let index = 0; index < total; index++) {
+    if (gap > 0) await pause(gap);
+    const key = `${PREFIX}${label}pace${index}`;
+    const started = performance.now();
+    const since = () => Math.round(performance.now() - started);
     let answered = false;
     const writing = rawCall(cloud, 'setItem', key, chunk).then((call) => { answered = true; return call; });
-    const watcher = pause(600).then(() => (answered ? null : rawCall(cloud, 'getItem', key)));
+    // Появилось значение между чтением, начатым на lastMiss мс, и чтением, начатым на firstHit мс.
+    const watcher = (async () => {
+      await pause(600);
+      let lastMiss = null;
+      while (!answered) {
+        const readStarted = since();
+        const read = await rawCall(cloud, 'getItem', key);
+        if (succeeded(read) && read.result === chunk) return { lastMiss, firstHit: readStarted };
+        lastMiss = readStarted;
+        await pause(400);
+      }
+      return null;
+    })();
     const call = await writing;
     const number = made;
     if (accepted(call) && call.ms <= 1000) continue;
-    const early = await watcher;
-    const landed = early === null ? 'ответ пришёл раньше' : succeeded(early) && early.result === chunk ? 'значение уже лежало' : 'значения ещё не было';
-    if (early !== null) counts[landed === 'значение уже лежало' ? 'early' : 'notYet']++;
+    const found = await watcher;
+    let where = 'до ответа значение не нашли';
+    if (found) {
+      where = found.lastMiss === null ? `значение уже лежало при первом чтении (${found.firstHit} мс)` : `значение появилось между ${found.lastMiss} и ${found.firstHit} мс`;
+      landings.push(found.firstHit);
+    }
     if (accepted(call)) {
       counts.slow++;
-      events.push(`№${number}: МЕДЛЕННО ${Math.round(call.ms)} мс; на 0,6 с ${landed}`);
+      events.push(`запись ${index + 1}-я (вызов №${number}): МЕДЛЕННО, подтверждение на ${Math.round(call.ms)} мс; ${where}`);
     } else {
       counts.hung++;
       await pause(2000);
       const back = await rawCall(cloud, 'getItem', key);
-      events.push(`№${number}: НЕТ ОТВЕТА; на 0,6 с ${landed}; через 8+2 с ${succeeded(back) && back.result === chunk ? 'значение лежит' : 'пусто'}`);
+      const lies = succeeded(back) && back.result === chunk;
+      if (!lies) counts.never++;
+      events.push(`запись ${index + 1}-я (вызов №${number}): НЕТ ОТВЕТА за ${CALL_LIMIT / 1000} с; ${where}; через 2 с после срока ${lies ? 'значение лежит' : 'пусто'}`);
     }
   }
-  log('      200 записей куска слоя (4096 байт) подряд:');
-  log(`        не ответили ${counts.hung}, медленнее секунды ${counts.slow}; из них на 0,6 с значение уже лежало ${counts.early}, ещё не лежало ${counts.notYet}`);
+  log(`      ${total} записей куска слоя (4096 байт)${gap > 0 ? ` с паузой ${gap / 1000} с перед каждой` : ' подряд'}:`);
+  log(`        не ответили ${counts.hung} (из них значения так и нет: ${counts.never}), медленнее секунды ${counts.slow}`);
+  if (landings.length > 0) log(`        значение нашлось к ${landings.length} из ${counts.hung + counts.slow} аномальных записей до ответа; поздняя граница находок: ${Math.min(...landings)}–${Math.max(...landings)} мс`);
   for (const line of events) log(`        ${line}`);
 }
 
@@ -236,8 +261,10 @@ async function repeats(cloud, text) {
     log(`        (№ — номер вызова за сеанс; мс или НЕТ): ${results.join(' ')}`);
   };
   await pacing(cloud, chunk);
+  // Если отказ — счётчик (каждая ~10-я запись), то и при редких записях он придёт на каждой ~10-й; если от темпа — не придёт.
+  await pacing(cloud, chunk, 30, 3000, 'slow');
   for (const count of [1, 10, 100, 500, 2048]) await outcomes(`обратных косых: ${count}`, '\\'.repeat(count), 3);
-  await rawCall(cloud, 'removeItems', Array.from({ length: 200 }, (_, index) => `${PREFIX}pace${index}`));
+  await rawCall(cloud, 'removeItems', [...Array.from({ length: 200 }, (_, index) => `${PREFIX}pace${index}`), ...Array.from({ length: 30 }, (_, index) => `${PREFIX}slowpace${index}`)]);
 }
 
 // Пять частей слоя по очереди и пять разом, раунды вперемешку. Если облако
