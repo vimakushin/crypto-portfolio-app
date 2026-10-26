@@ -168,42 +168,44 @@ async function diagnose(cloud, text) {
 
 // Номер сборки страницы: Телеграм на телефоне может показать старую копию из кэша,
 // и по этой строке в присланном тексте видно, какая версия на самом деле работала.
-const BUILD = 'повторы-4';
+const BUILD = 'повторы-5';
 
 // Один и тот же кусок слоя пишется много раз подряд под разными ключами, и отдельно
 // — короткие значения с обратными косыми. Если зависания случайны, они будут и у
 // одинаковых значений; если зависает только содержимое, то каждый раз одно и то же.
-// Проверка догадки «клиент ограничивает частоту записей»: 200 записей одного
-// значения, нечётные — с паузой в полсекунды перед записью, чётные — сразу после
-// предыдущей. Если причина в частоте, отказы будут почти только у чётных.
-// У каждого отказа печатаем, сколько записей было за предыдущую секунду и пять.
+// 200 записей одного значения подряд под новыми ключами. Прошлый прогон показал:
+// частота записей ни при чём (с паузой и без отказы те же), а зависшие записи
+// после срока лежат в облаке — теряется подтверждение, а не запись. Теперь
+// выясняем, КОГДА запись ложится: если ответа нет уже 0,6 с, читаем ключ и
+// смотрим, лежит ли значение. Лежит — подтверждение просто опаздывает, и срок
+// можно ставить коротким: перечитав ключ, мы узнаем исход; нет — запись ещё в
+// пути, и оборванная запись может лечь позже следующей.
 async function pacing(cloud, chunk) {
-  const starts = [];
-  const classes = { 'без паузы': { hung: 0, slow: 0, total: 0 }, 'с паузой 0,5 с': { hung: 0, slow: 0, total: 0 } };
   const events = [];
+  const counts = { hung: 0, slow: 0, early: 0, notYet: 0 };
   for (let index = 0; index < 200; index++) {
-    const paused = index % 2 === 1;
-    const kind = paused ? 'с паузой 0,5 с' : 'без паузы';
-    if (paused) await pause(500);
     const key = `${PREFIX}pace${index}`;
-    const now = performance.now();
-    const inSecond = starts.filter((t) => now - t < 1000).length;
-    const inFive = starts.filter((t) => now - t < 5000).length;
-    starts.push(now);
-    const call = await rawCall(cloud, 'setItem', key, chunk);
+    let answered = false;
+    const writing = rawCall(cloud, 'setItem', key, chunk).then((call) => { answered = true; return call; });
+    const watcher = pause(600).then(() => (answered ? null : rawCall(cloud, 'getItem', key)));
+    const call = await writing;
     const number = made;
-    classes[kind].total++;
+    if (accepted(call) && call.ms <= 1000) continue;
+    const early = await watcher;
+    const landed = early === null ? 'ответ пришёл раньше' : succeeded(early) && early.result === chunk ? 'значение уже лежало' : 'значения ещё не было';
+    if (early !== null) counts[landed === 'значение уже лежало' ? 'early' : 'notYet']++;
     if (accepted(call)) {
-      if (call.ms > 1000) { classes[kind].slow++; events.push(`№${number} ${kind}: МЕДЛЕННО ${Math.round(call.ms)} мс, записей за 1 с / 5 с до того: ${inSecond}/${inFive}`); }
+      counts.slow++;
+      events.push(`№${number}: МЕДЛЕННО ${Math.round(call.ms)} мс; на 0,6 с ${landed}`);
     } else {
-      classes[kind].hung++;
+      counts.hung++;
       await pause(2000);
       const back = await rawCall(cloud, 'getItem', key);
-      events.push(`№${number} ${kind}: НЕТ ОТВЕТА (${succeeded(back) && back.result === chunk ? 'значение лежит' : 'пусто'}), записей за 1 с / 5 с до того: ${inSecond}/${inFive}`);
+      events.push(`№${number}: НЕТ ОТВЕТА; на 0,6 с ${landed}; через 8+2 с ${succeeded(back) && back.result === chunk ? 'значение лежит' : 'пусто'}`);
     }
   }
-  log(`      200 записей куска слоя (4096 байт):`);
-  for (const [kind, c] of Object.entries(classes)) log(`        ${kind}: не ответили ${c.hung} из ${c.total}, дольше секунды ${c.slow}`);
+  log('      200 записей куска слоя (4096 байт) подряд:');
+  log(`        не ответили ${counts.hung}, медленнее секунды ${counts.slow}; из них на 0,6 с значение уже лежало ${counts.early}, ещё не лежало ${counts.notYet}`);
   for (const line of events) log(`        ${line}`);
 }
 
@@ -242,7 +244,7 @@ async function repeats(cloud, text) {
 // переваривает параллельные вызовы, раунд «разом» занимает время одного вызова.
 async function parallelism(cloud, text) {
   log();
-  log('    ПАРАЛЛЕЛЬНО ИЛИ ПО ОЧЕРЕДИ: пять частей по 4096 байт, 20 раундов каждого способа вперемешку');
+  log('    ПАРАЛЛЕЛЬНО ИЛИ ПО ОЧЕРЕДИ: пять частей по 4096 байт, 20 раундов каждого способа вперемешку, каждый раунд под новыми ключами');
   const pieces = splitByBytes(text, 4096).slice(0, 5);
   const stats = { 'по очереди': [], 'разом': [] };
   for (let round = 0; round < 20; round++) {
@@ -250,10 +252,10 @@ async function parallelism(cloud, text) {
       const started = performance.now();
       let calls;
       if (mode === 'разом') {
-        calls = await Promise.all(pieces.map((piece, index) => rawCall(cloud, 'setItem', `${PREFIX}par${index}`, piece)));
+        calls = await Promise.all(pieces.map((piece, index) => rawCall(cloud, 'setItem', `${PREFIX}par${round}a${index}`, piece)));
       } else {
         calls = [];
-        for (const [index, piece] of pieces.entries()) calls.push(await rawCall(cloud, 'setItem', `${PREFIX}par${index}`, piece));
+        for (const [index, piece] of pieces.entries()) calls.push(await rawCall(cloud, 'setItem', `${PREFIX}par${round}b${index}`, piece));
       }
       stats[mode].push({ ms: performance.now() - started, hung: calls.filter((call) => !accepted(call)).length });
     }
@@ -263,7 +265,8 @@ async function parallelism(cloud, text) {
     const hungParts = rounds.reduce((sum, round) => sum + round.hung, 0);
     log(`      ${mode}: частей не ответили ${hungParts} из ${rounds.length * 5}; раундов без сбоев ${clean.length} из ${rounds.length}${clean.length ? `, из них медиана ${Math.round(median(clean))} мс, самый долгий ${Math.round(Math.max(...clean))} мс` : ''}`);
   }
-  await rawCall(cloud, 'removeItems', Array.from({ length: 5 }, (_, index) => `${PREFIX}par${index}`));
+  const parKeys = (await rawCall(cloud, 'getKeys')).result?.filter((key) => key.startsWith(`${PREFIX}par`)) ?? [];
+  for (let from = 0; from < parKeys.length; from += 50) await rawCall(cloud, 'removeItems', parKeys.slice(from, from + 50));
 }
 
 async function run() {
