@@ -72,10 +72,17 @@ async function checksum(text) {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
+// Поколение — время создания (9 знаков, миллисекунды в системе счисления 36) и
+// 12 случайных знаков. Время нужно уборке: по нему видно, что часть давно
+// брошена, а не пишется прямо сейчас другой вкладкой. Старые поколения без
+// времени (12 знаков) по возрасту не убираются.
+const GENERATION_LENGTH = 21;
 function newGeneration() {
   const bytes = crypto.getRandomValues(new Uint8Array(6));
-  return [...bytes].map((byte) => byte.toString(36).padStart(2, '0')).join('');
+  return Date.now().toString(36).padStart(9, '0') + [...bytes].map((byte) => byte.toString(36).padStart(2, '0')).join('');
 }
+const abandoned = (generation) => generation.length === GENERATION_LENGTH
+  && Date.now() - parseInt(generation.slice(0, 9), 36) > ABANDONED_AFTER;
 
 // --- Запись и чтение ---
 
@@ -92,9 +99,17 @@ async function currentGeneration(backend) {
 // Оборвавшиеся записи оставляют части без главной записи. Обычно их
 // убирает следующая запись, но чистка осторожна: часть, которой нет в нашем
 // поколении, может принадлежать записи другой вкладки, которая сейчас идёт.
-// Поэтому убираем только поколение, которое мы сами заменили, а всё
-// остальное — лишь когда ключей стало так много, что они начинают мешать.
+// Поэтому убираем поколение, которое мы сами заменили, и поколения старше
+// часа (см. ABANDONED_AFTER), а всё остальное — лишь когда ключей стало так
+// много, что они начинают мешать.
 const SWEEP_ABOVE = 700;
+
+// Запись из нескольких десятков частей идёт секунды, и час с большим запасом
+// покрывает и медленное облако, и разницу часов на двух устройствах. Часть
+// старше часа, на которую не указывает главная запись, никто уже не допишет:
+// её убирает любая следующая запись, так что неудавшееся удаление не копится
+// и помнить о нём не нужно.
+const ABANDONED_AFTER = 60 * 60 * 1000;
 
 // Ключей в хранилище Телеграма не больше 1024; ближе к этому остатки старых
 // записей мешают новой, и их убирают до неё.
@@ -144,7 +159,7 @@ async function save(backend, text, operations) {
     const stale = keys.filter((key) => {
       if (!isChunkKey(key)) return false;
       const owner = key.slice(1, key.indexOf('_'));
-      return !keep.has(owner) && (owner === previous || keys.length > SWEEP_ABOVE);
+      return !keep.has(owner) && (owner === previous || abandoned(owner) || keys.length > SWEEP_ABOVE);
     });
     await backend.remove(stale);
   } catch {

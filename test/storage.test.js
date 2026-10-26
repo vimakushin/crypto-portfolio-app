@@ -685,3 +685,45 @@ test('облако само ответило отказом: не повторя
   await assert.rejects(telegramBackend(cloud, 20).set('k', 'v'), /сбой сети/);
   assert.equal(cloud.setCalls, 1);
 });
+
+// --- Уборка по возрасту ---
+
+// Облако, у которого первые n удалений молчат с ошибкой: части прошлого состояния остаются.
+function cloudFailingRemoves(n) {
+  const cloud = fakeCloud();
+  const inner = cloud.removeItems;
+  let calls = 0;
+  cloud.removeItems = (keys, callback) => (++calls <= n ? queueMicrotask(() => callback('сбой сети')) : inner(keys, callback));
+  return cloud;
+}
+const chunkOwners = (cloud) => new Set([...cloud.data.keys()].filter((key) => key !== 'm').map((key) => key.slice(1, key.indexOf('_'))));
+
+test('неудавшееся удаление старых частей не копится: через час любая запись их подметает', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 9, 26, 12) });
+  const cloud = cloudFailingRemoves(1);
+  const store = createStore(telegramBackend(cloud));
+  await store.save({ operations: history(), names: {} });
+  await store.save({ operations: history(), names: {} }); // убрать первое поколение не вышло
+  assert.equal(chunkOwners(cloud).size, 2, 'осталось и прежнее, и текущее');
+  t.mock.timers.setTime(Date.UTC(2026, 9, 26, 12, 30));
+  await store.save({ operations: history(), names: {} });
+  assert.equal(chunkOwners(cloud).size, 2, 'полчаса — ещё не бросовые: их мог писать кто-то сейчас');
+  t.mock.timers.setTime(Date.UTC(2026, 9, 26, 14));
+  await store.save({ operations: history(), names: {} });
+  assert.equal(chunkOwners(cloud).size, 1, 'через два часа остался только текущий набор');
+  assert.equal((await store.load()).status, 'ok');
+});
+
+test('свежую запись другой вкладки уборка по возрасту не трогает, а брошенную старую — убирает', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 9, 26, 12) });
+  const cloud = fakeCloud();
+  const backend = telegramBackend(cloud);
+  const stamp = (ms) => ms.toString(36).padStart(9, '0') + 'abcdefghijkl';
+  const fresh = `c${stamp(Date.UTC(2026, 9, 26, 11, 50))}_0`;
+  const old = `c${stamp(Date.UTC(2026, 9, 26, 9))}_0`;
+  await backend.set(fresh, 'часть записи, которая идёт сейчас');
+  await backend.set(old, 'часть давно оборвавшейся записи');
+  await createStore(backend).save({ operations: history(), names: {} });
+  assert.ok(cloud.data.has(fresh), 'десять минут назад — могла идти запись другой вкладки');
+  assert.ok(!cloud.data.has(old), 'три часа назад — её никто не допишет');
+});
