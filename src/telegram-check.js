@@ -171,7 +171,9 @@ async function run() {
     for (const line of signs()) log(`    ${line}`);
     return false;
   }
+  const scriptStarted = performance.now();
   await loadTelegram(window, document);
+  const scriptMs = performance.now() - scriptStarted;
   const app = window.Telegram.WebApp;
   const cloud = app.CloudStorage;
 
@@ -182,6 +184,7 @@ async function run() {
   log(`    язык: ${navigator.language}, дата в этом языке: ${new Date(2026, 9, 25).toLocaleDateString()}`);
   log(`    браузер: ${navigator.userAgent}`);
   for (const line of signs()) log(`    ${line}`);
+  log(`    скрипт Телеграма загрузился за ${Math.round(scriptMs)} мс`);
   log(`    срок ожидания каждого вызова облака в этой проверке: ${CALL_LIMIT / 1000} с`);
   log();
 
@@ -262,6 +265,9 @@ async function run() {
   } catch (error) {
     verdict(5, 'слой хранения целиком работает на живом облаке', false, `ошибка: ${error.message}`);
   }
+  // Сколько времени занимают вызовы слоя — по ним выбирается срок ожидания в приложении.
+  const answered = trace.filter((entry) => entry.done).map((entry) => entry.ms);
+  log(`    вызовов слоя: ${trace.length}, ответили: ${answered.length}${answered.length ? `, медиана ${Math.round(median(answered))} мс, самый долгий ${Math.round(Math.max(...answered))} мс` : ''}`);
   if (!layerOk) {
     printTrace(trace);
     await diagnose(cloud, realText);
