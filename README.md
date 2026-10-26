@@ -4,7 +4,7 @@ Tracks crypto holdings spread across several exchanges and wallets, with the ave
 
 **Open it:** https://vimakushin.github.io/crypto-portfolio-app/
 
-Work in progress: the Telegram Mini App support is written but has not been run inside Telegram yet, and the interface is in Russian only. See [Status](#status).
+Work in progress: the Telegram Mini App support is written and partly checked inside Telegram, but saving to Telegram's cloud storage has not passed a test on a real device yet, and the interface is in Russian only. See [Status](#status).
 
 ## The interesting part
 
@@ -55,14 +55,14 @@ What works today, in a browser:
 
 Not done yet:
 
-- **it has not been run inside Telegram yet.** The code is written: it is meant to detect Telegram, load its script only then, and keep the data in Telegram's cloud storage. It is tested against a fake of the cloud storage that enforces the documented limits. Four things the storage code assumes about the real cloud (what an absent key returns, that a write is confirmed with `true`, whether the 4096 limit counts bytes or characters, whether the cloud holds foreign keys) are not in Telegram's documentation. Neither are the launch parameters the detection relies on, and that is unverified too. `telegram-check.html` checks all of it against the real thing when opened from a bot; until it has been run, they are assumptions;
+- **saving to Telegram's cloud storage is not confirmed to work.** The app detects Telegram and loads its script only then. A first run of `telegram-check.html` on an iPhone (Bot API 9.6) confirmed the four things the storage code assumed: an absent key reads as an empty string, a write is confirmed with `true`, the 4096 limit counts bytes, and the cloud holds no keys other than ours. The same run showed that a write over the limit got no reply at all (no error, no confirmation), and that the storage layer as a whole did not pass against the real cloud. The cause is not known yet; the check page has been rebuilt to log every call and to try values of different sizes, and has not been run again yet;
 - there is no main screen with positions and averages;
 - entries cannot be edited, only the last one undone;
 - the interface is in Russian only.
 
 ## Checking Telegram's cloud storage
 
-`telegram-check.html` runs the checks listed under Status on the real cloud storage, also exercises the whole storage layer and times the calls, and prints what it found, including which Telegram signs it saw. Point a bot's Mini App address at it, open it from Telegram, and copy the result. It uses keys starting with `x-chk-` (a prefix the app's own keys cannot have) and removes them at the end; if a run is cut short, the next run removes the leftovers. It does not modify the app's own data (it only lists key names) and does not read the user's name or id.
+`telegram-check.html` runs on the real cloud storage and prints what it observes. It checks the four assumptions above, runs the whole storage layer (save, read back, overwrite, clean-up, erase) and logs every call it makes. If the storage layer fails, it tries values of different sizes and contents to see which one is not accepted. It also times single reads and writes. A final block deliberately writes values over the 4096-byte limit, which Telegram does not answer, and then checks whether ordinary calls still work afterwards; this adds about half a minute. The page reports what it saw; it does not explain why something fails. The output also lists which launch parameter names and communication channel it detected, plus the browser string, language and window size, so look it over before sharing it. The page and its output are in Russian. Point a bot's Mini App address at the page, open it from Telegram, and copy the result. It uses keys starting with `x-chk-` (a prefix the app's own keys cannot have) and tries to remove them at the end; if a run is cut short, the next run removes the leftovers. It does not change the app's own data (it only lists key names) and does not read the user's name or id.
 
 ## Running it
 
