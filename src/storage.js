@@ -251,12 +251,16 @@ export function localBackend(storage, prefix = 'crypto-portfolio-app/') {
 }
 
 // Облако Телеграма: колбэки «ошибка первым аргументом», как в документации.
-// Клиент может не ответить вовсе (связь, закрытый канал); без срока ожидания
-// приложение зависло бы на чтении. Не ответил — это ошибка, а исход записи
-// при этом неизвестен: так её и разбирает слой выше.
-export function telegramBackend(cloud, timeoutMs = 15000) {
+// Клиент может не ответить вовсе (на живом облаке так бывает и со значением,
+// которое минуту назад прошло); без срока ожидания приложение зависло бы на
+// чтении. Срок — 7 секунд: исправные вызовы на живом облаке заняли от 79 до
+// 342 мс и один 3410 мс, а повисшие за 20 секунд не ответили ни разу, то есть
+// любой срок между 3,4 и 20 секундами сообщает то же самое; взято вдвое больше
+// самого долгого исправного. Не ответил — это не «записано» и не «не записано»:
+// запись при этом перечитывается (см. set), чтение просто ошибка.
+export function telegramBackend(cloud, timeoutMs = 7000) {
   const call = (method, ...args) => new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Телеграм не ответил')), timeoutMs);
+    const timer = setTimeout(() => reject(Object.assign(new Error('Телеграм не ответил'), { silent: true })), timeoutMs);
     cloud[method](...args, (error, result) => {
       clearTimeout(timer);
       if (error) reject(new Error(String(error)));
@@ -268,7 +272,22 @@ export function telegramBackend(cloud, timeoutMs = 15000) {
   };
   return {
     get: async (key) => present(await call('getItem', key)),
-    set: async (key, value) => confirmed(await call('setItem', key, value)),
+    // Молчание не объявляем ни успехом, ни провалом: смотрим, что лежит под
+    // ключом. Лежит наше — записано. Нет — пишем ещё раз (тот же ключ и то же
+    // значение, повтор ничего не портит). Ответа нет и со второго раза — ошибка.
+    // Ошибку, которую облако прислало само, не повторяем: это определённый отказ.
+    set: async (key, value) => {
+      try {
+        confirmed(await call('setItem', key, value));
+        return;
+      } catch (error) {
+        if (!error.silent) throw error;
+      }
+      try {
+        if ((await call('getItem', key)) === value) return;
+      } catch { /* перечитать не вышло — пробуем записать ещё раз */ }
+      confirmed(await call('setItem', key, value));
+    },
     remove: async (keys) => { if (keys.length > 0) confirmed(await call('removeItems', keys)); },
     keys: () => call('getKeys'),
   };

@@ -1022,6 +1022,10 @@ async function connect() {
 async function start() {
   input.date.max = today();
   input.date.value = today();
+  // Обычное чтение из облака занимает десятые доли секунды; если прошла секунда
+  // (в четыре раза дольше самой долгой типичной записи), экран не должен стоять
+  // молча. Если подпись уже скрыта, ничего не меняется.
+  setTimeout(() => { if (!byId('loading').hidden) byId('loading').textContent = 'Облако отвечает медленно…'; }, 1000);
   let picked;
   try {
     picked = await connect();

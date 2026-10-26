@@ -644,3 +644,44 @@ test('код монеты «constructor» или «__proto__» читается 
     assert.equal(loaded.state.names[coin], 'Тест');
   }
 });
+
+// Облако, у которого выбранные вызовы setItem молчат; если дошла до ключа, запись при этом лежит
+// (молчание в ответе) или не лежит (молчание на пути туда).
+function mutingCloud({ silentSets, stored }) {
+  const cloud = fakeCloud();
+  const inner = cloud.setItem;
+  let sets = 0;
+  cloud.setItem = (key, value, callback) => {
+    sets += 1;
+    if (!silentSets.includes(sets)) return inner(key, value, callback);
+    if (stored) inner(key, value, () => {});
+  };
+  cloud.attempts = () => sets;
+  return cloud;
+}
+
+test('запись промолчала, но значение лежит: перечитали и считаем записанной, без повтора', async () => {
+  const cloud = mutingCloud({ silentSets: [1], stored: true });
+  await telegramBackend(cloud, 20).set('k', 'v');
+  assert.equal(cloud.attempts(), 1);
+  assert.equal(cloud.data.get('k'), 'v');
+});
+
+test('запись промолчала и значения нет: один повтор, и он записывает', async () => {
+  const cloud = mutingCloud({ silentSets: [1], stored: false });
+  await telegramBackend(cloud, 20).set('k', 'v');
+  assert.equal(cloud.attempts(), 2);
+  assert.equal(cloud.data.get('k'), 'v');
+});
+
+test('запись молчит и со второго раза: ошибка, больше двух попыток нет', async () => {
+  const cloud = mutingCloud({ silentSets: [1, 2, 3], stored: false });
+  await assert.rejects(telegramBackend(cloud, 20).set('k', 'v'), /не ответил/);
+  assert.equal(cloud.attempts(), 2);
+});
+
+test('облако само ответило отказом: не повторяем', async () => {
+  const cloud = fakeCloud({ failOnSet: () => true });
+  await assert.rejects(telegramBackend(cloud, 20).set('k', 'v'), /сбой сети/);
+  assert.equal(cloud.setCalls, 1);
+});

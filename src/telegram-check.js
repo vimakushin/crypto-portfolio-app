@@ -34,9 +34,12 @@ function verdict(number, title, ok, detail) {
 // а не успех и не вечное ожидание.
 const CALL_LIMIT = 8000;
 const bytes = (text) => new TextEncoder().encode(text).length;
+// Сквозной номер вызова облака за всё время работы страницы (и прямых, и слоя): по нему видно, не сбиваются ли отказы к концу.
+let made = 0;
 
 // Вызов облака без нашей обёртки: нужны сырые ответы, как их видит клиент.
 function rawCall(cloud, method, ...args) {
+  made++;
   return new Promise((resolve) => {
     const started = performance.now();
     const timer = setTimeout(() => resolve({ timeout: true }), CALL_LIMIT);
@@ -94,6 +97,7 @@ function traced(cloud, trace) {
       done: false,
     };
     trace.push(entry);
+    made++;
     return cloud[method](...args, (error, result) => {
       entry.done = true;
       entry.ms = performance.now() - entry.started;
@@ -164,7 +168,7 @@ async function diagnose(cloud, text) {
 
 // Номер сборки страницы: Телеграм на телефоне может показать старую копию из кэша,
 // и по этой строке в присланном тексте видно, какая версия на самом деле работала.
-const BUILD = 'повторы-1';
+const BUILD = 'повторы-2';
 
 // Один и тот же кусок слоя пишется много раз подряд под разными ключами, и отдельно
 // — короткие значения с обратными косыми. Если зависания случайны, они будут и у
@@ -177,9 +181,9 @@ async function repeats(cloud, text) {
     const results = [];
     for (let index = 0; index < times; index++) {
       const call = await rawCall(cloud, 'setItem', `${PREFIX}rep${index}`, value);
-      results.push(accepted(call) ? `${Math.round(call.ms)}` : 'НЕТ');
+      results.push(`№${made}:${accepted(call) ? Math.round(call.ms) : 'НЕТ'}`);
     }
-    log(`      ${label} (${bytes(value)} байт) ×${times}: ${results.join(' ')} мс`);
+    log(`      ${label} (${bytes(value)} байт) ×${times} (№ — номер вызова за сеанс; мс или НЕТ): ${results.join(' ')}`);
   };
   await outcomes('кусок слоя, который в прошлый раз прошёл и повис', chunk, 20);
   for (const count of [1, 10, 100, 500, 2048]) await outcomes(`обратных косых: ${count}`, '\\'.repeat(count), 3);
