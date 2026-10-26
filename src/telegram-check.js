@@ -168,7 +168,7 @@ async function diagnose(cloud, text) {
 
 // Номер сборки страницы: Телеграм на телефоне может показать старую копию из кэша,
 // и по этой строке в присланном тексте видно, какая версия на самом деле работала.
-const BUILD = 'повторы-2';
+const BUILD = 'повторы-3';
 
 // Один и тот же кусок слоя пишется много раз подряд под разными ключами, и отдельно
 // — короткие значения с обратными косыми. Если зависания случайны, они будут и у
@@ -179,15 +179,57 @@ async function repeats(cloud, text) {
   const chunk = splitByBytes(text, 4096)[0];
   const outcomes = async (label, value, times) => {
     const results = [];
+    let hung = 0;
+    let slow = 0;
     for (let index = 0; index < times; index++) {
-      const call = await rawCall(cloud, 'setItem', `${PREFIX}rep${index}`, value);
-      results.push(`№${made}:${accepted(call) ? Math.round(call.ms) : 'НЕТ'}`);
+      const key = `${PREFIX}rep${index}`;
+      const call = await rawCall(cloud, 'setItem', key, value);
+      const number = made;
+      if (accepted(call)) {
+        if (call.ms > 1000) slow++;
+        results.push(`№${number}:${Math.round(call.ms)}`);
+      } else {
+        // Повисшая запись: легла она всё-таки или нет — от этого зависит, чего стоит перечитывание после срока.
+        hung++;
+        await pause(2000);
+        const back = await rawCall(cloud, 'getItem', key);
+        results.push(`№${number}:НЕТ(${succeeded(back) && back.result === value ? 'значение лежит' : 'пусто'})`);
+      }
     }
-    log(`      ${label} (${bytes(value)} байт) ×${times} (№ — номер вызова за сеанс; мс или НЕТ): ${results.join(' ')}`);
+    log(`      ${label} (${bytes(value)} байт) ×${times}: не ответили ${hung}, дольше секунды ${slow}`);
+    log(`        (№ — номер вызова за сеанс; мс или НЕТ): ${results.join(' ')}`);
   };
-  await outcomes('кусок слоя, который в прошлый раз прошёл и повис', chunk, 20);
+  await outcomes('кусок слоя, который в прошлый раз прошёл и повис', chunk, 100);
   for (const count of [1, 10, 100, 500, 2048]) await outcomes(`обратных косых: ${count}`, '\\'.repeat(count), 3);
-  await rawCall(cloud, 'removeItems', Array.from({ length: 20 }, (_, index) => `${PREFIX}rep${index}`));
+  await rawCall(cloud, 'removeItems', Array.from({ length: 100 }, (_, index) => `${PREFIX}rep${index}`));
+}
+
+// Пять частей слоя по очереди и пять разом, раунды вперемешку. Если облако
+// переваривает параллельные вызовы, раунд «разом» занимает время одного вызова.
+async function parallelism(cloud, text) {
+  log();
+  log('    ПАРАЛЛЕЛЬНО ИЛИ ПО ОЧЕРЕДИ: пять частей по 4096 байт, 20 раундов каждого способа вперемешку');
+  const pieces = splitByBytes(text, 4096).slice(0, 5);
+  const stats = { 'по очереди': [], 'разом': [] };
+  for (let round = 0; round < 20; round++) {
+    for (const mode of ['по очереди', 'разом']) {
+      const started = performance.now();
+      let calls;
+      if (mode === 'разом') {
+        calls = await Promise.all(pieces.map((piece, index) => rawCall(cloud, 'setItem', `${PREFIX}par${index}`, piece)));
+      } else {
+        calls = [];
+        for (const [index, piece] of pieces.entries()) calls.push(await rawCall(cloud, 'setItem', `${PREFIX}par${index}`, piece));
+      }
+      stats[mode].push({ ms: performance.now() - started, hung: calls.filter((call) => !accepted(call)).length });
+    }
+  }
+  for (const [mode, rounds] of Object.entries(stats)) {
+    const clean = rounds.filter((round) => round.hung === 0).map((round) => round.ms);
+    const hungParts = rounds.reduce((sum, round) => sum + round.hung, 0);
+    log(`      ${mode}: частей не ответили ${hungParts} из ${rounds.length * 5}; раундов без сбоев ${clean.length} из ${rounds.length}${clean.length ? `, из них медиана ${Math.round(median(clean))} мс, самый долгий ${Math.round(Math.max(...clean))} мс` : ''}`);
+  }
+  await rawCall(cloud, 'removeItems', Array.from({ length: 5 }, (_, index) => `${PREFIX}par${index}`));
 }
 
 async function run() {
@@ -302,6 +344,7 @@ async function run() {
     await diagnose(cloud, realText);
   }
   await repeats(cloud, realText);
+  await parallelism(cloud, realText);
   // Что бы ни случилось, слой после себя убирает; на всякий случай — ещё раз.
   const strays = ((await rawCall(cloud, 'getKeys')).result ?? []).filter((key) => key.startsWith(PREFIX));
   if (strays.length > 0) await rawCall(cloud, 'removeItems', strays);
