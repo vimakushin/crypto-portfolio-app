@@ -697,6 +697,13 @@ form.addEventListener('submit', (event) => {
     text('record-error', broken);
     return;
   }
+  // Такая же запись, которую хранилище ещё не подтвердило, — почти наверняка
+  // повторный ввод той же самой: она могла и не сохраниться, и сохраниться, а
+  // вторая такая же исказила бы среднюю.
+  if (store !== null && operations.slice(confirmedCount).some((op) => JSON.stringify(op) === JSON.stringify(read.operation))) {
+    text('record-error', 'Такая же запись уже внесена и ещё не сохранилась. Вносить её заново не нужно, иначе она задвоится: дождитесь «Сохранено» или нажмите «Сохранить ещё раз».');
+    return;
+  }
 
   const coin = read.coin;
   const before = position(coin);
@@ -925,14 +932,21 @@ function resetView() {
   setMode(mode);
 }
 
+// Сколько записей из списка подтверждено хранилищем. Остальные — на странице,
+// но в хранилище их может не быть (а может быть: запись, не получившая ответа,
+// иногда всё же ложится). Нужно, чтобы человек не внёс такую запись второй раз.
+let confirmedCount = 0;
+
 function showSaveState(kind, detail = '') {
   const element = byId('save-state');
   const failed = kind === 'failed' || kind === 'unavailable';
+  if (kind === 'saved') confirmedCount = operations.length;
+  byId('save-again').hidden = kind !== 'failed';
   element.className = failed ? 'error' : 'hint';
   element.textContent = {
     saving: 'Сохраняю…',
     saved: `Сохранено ${where()}`,
-    failed: `Не удалось сохранить: ${detail}. Записи остались только на этой странице — выгрузите их в файл ниже.`,
+    failed: `Не удалось сохранить: ${detail}. Запись не потеряна: она есть на этой странице, вносить её заново не нужно. Нажмите «Сохранить ещё раз» и не закрывайте страницу, пока не появится «Сохранено». Копию можно сохранить в файл ниже.`,
     unavailable: `${unavailableReason}: записи пропадут при закрытии страницы. Выгрузите их в файл ниже.`,
   }[kind];
 }
@@ -967,6 +981,8 @@ function persist() {
     (error) => { if (attempt === saveRun) showSaveState('failed', error.message); },
   );
 }
+
+byId('save-again').addEventListener('click', persist);
 
 // Прочитанное проверяется так же, как загруженный файл: хранилище могли
 // изменить, а расчёт на испорченных данных дал бы неверные числа.
