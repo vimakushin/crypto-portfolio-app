@@ -77,19 +77,48 @@ async function checksum(text) {
 // брошена, а не пишется прямо сейчас другой вкладкой. Старые поколения без
 // времени (12 знаков) по возрасту не убираются.
 const GENERATION_LENGTH = 21;
-function newGeneration() {
+// Время поколения внутри сессии только растёт, даже если часы шагнули назад или
+// две записи пришлись на одну миллисекунду: иначе более новое поколение получило
+// бы имя «старше» и перепроверка приняла бы за «легло» прежнюю главную запись.
+// Между сессиями и устройствами порядок держится на часах как есть.
+function newGeneration(memory) {
+  memory.time = Math.max(Date.now(), memory.time + 1);
   const bytes = crypto.getRandomValues(new Uint8Array(6));
-  return Date.now().toString(36).padStart(9, '0') + [...bytes].map((byte) => byte.toString(36).padStart(2, '0')).join('');
+  return memory.time.toString(36).padStart(9, '0') + [...bytes].map((byte) => byte.toString(36).padStart(2, '0')).join('');
 }
-const abandoned = (generation) => generation.length === GENERATION_LENGTH
+const timed = (generation) => typeof generation === 'string' && generation.length === GENERATION_LENGTH;
+const abandoned = (generation) => timed(generation)
   && Date.now() - parseInt(generation.slice(0, 9), 36) > ABANDONED_AFTER;
+
+// Новее ли a, чем b. Сравнимы только поколения со временем в имени; про старые
+// (без времени) ничего не известно, и ответ «нет».
+const newer = (a, b) => timed(a) && timed(b) && a > b;
+
+// «Главная запись легла»: в облаке лежит наша или более новая. Более новая
+// — это запись другой вкладки или устройства, наша уже успела стать прошлой.
+const settled = (ours) => (text) => {
+  try {
+    const generation = JSON.parse(text)?.gen;
+    return generation === ours || newer(generation, ours);
+  } catch {
+    return false;
+  }
+};
 
 // --- Запись и чтение ---
 
 // Куда указывает главная запись сейчас; null — её нет или она нечитаема.
+// Не удалось прочитать — undefined, и это не то же, что null («записи нет»):
+// по непрочитанному ничего не убираем.
 async function currentGeneration(backend) {
+  let text;
   try {
-    const manifest = JSON.parse(present(await backend.get(MANIFEST)) ?? 'null');
+    text = present(await backend.get(MANIFEST));
+  } catch {
+    return undefined;
+  }
+  try {
+    const manifest = JSON.parse(text ?? 'null');
     return typeof manifest?.gen === 'string' ? manifest.gen : null;
   } catch {
     return null;
@@ -120,19 +149,22 @@ const CROWDED = 1000;
 // внести ещё одну, и счёт в главной записи не должен отстать от текста.
 // Бросает ошибку, если сохранить не вышло, и тогда прежнее сохранённое
 // состояние остаётся как было.
-async function save(backend, text, operations) {
+async function save(backend, text, operations, memory) {
   const pieces = splitByBytes(text);
   if (pieces.length > MAX_CHUNKS) {
     throw new Error('Данных больше, чем помещается в хранилище: выгрузите их в файл');
   }
-  const previous = await currentGeneration(backend);
+  const inCloud = await currentGeneration(backend);
+  // Опоздавшая запись прошлого поколения могла затереть главную запись, пока
+  // мы писали следующую: настоящее прошлое состояние — то, что мы записали сами.
+  const previous = memory.last && (inCloud === undefined || newer(memory.last.gen, inCloud)) ? memory.last.gen : inCloud;
   // Оборвавшиеся записи оставляют части, и если их накопилось столько, что
   // новая запись упрётся в лимит ключей, убирать их надо до неё, а не после.
   const before = await backend.keys();
-  if (before.length + pieces.length + 1 > CROWDED) {
+  if (inCloud !== undefined && before.length + pieces.length + 1 > CROWDED) {
     await backend.remove(before.filter((key) => isChunkKey(key) && key.slice(1, key.indexOf('_')) !== previous)).catch(() => {});
   }
-  const generation = newGeneration();
+  const generation = newGeneration(memory);
   const written = [];
   try {
     for (const [index, piece] of pieces.entries()) {
@@ -146,15 +178,30 @@ async function save(backend, text, operations) {
   }
 
   // Если результат этой записи неизвестен, новые части не удаляем: она могла
-  // пройти, и тогда главная запись на них уже указывает.
+  // пройти, и тогда главная запись на них уже указывает. Неизвестным он бывает
+  // только после перепроверки и повторов (см. telegramBackend.set): молчание
+  // облака исходом не считается. Определённый отказ облака (ошибка или не
+  // true) не повторяется и сразу становится ошибкой записи.
   const manifest = { v: FORMAT, gen: generation, chunks: pieces.length, ops: operations, sha: await checksum(text) };
-  await backend.set(MANIFEST, JSON.stringify(manifest));
+  const manifestText = JSON.stringify(manifest);
+  await backend.set(MANIFEST, manifestText, settled(generation));
+  memory.last = { gen: generation, text: manifestText };
 
-  // Не вышло убрать — не беда: лишние части ничему не мешают, их уберёт
-  // следующая запись. Главная запись могла за это время перейти к другой
-  // вкладке — её поколение не трогаем.
+  // Старые части убираются только после того, как главная запись прочитана
+  // из облака и это наша или более новая: прочитать не вышло — не убираем, их
+  // подметёт уборка по возрасту. Не вышло убрать — не беда: лишние части ничему
+  // не мешают. Главная запись могла за это время перейти к другой вкладке — её
+  // поколение не трогаем.
+  const current = await currentGeneration(backend);
+  if (current !== generation && !newer(current, generation)) {
+    // Если прочиталась главная запись старше нашей, её затёрла опоздавшая
+    // запись прошлого сохранения: ставим свою обратно. Не прочиталась вовсе
+    // (current === null) — ничего не трогаем, запись уже подтверждена облаком.
+    if (newer(generation, current)) await backend.set(MANIFEST, manifestText, settled(generation));
+    return;
+  }
   try {
-    const keep = new Set([generation, await currentGeneration(backend)]);
+    const keep = new Set([generation, current]);
     const keys = await backend.keys();
     const stale = keys.filter((key) => {
       if (!isChunkKey(key)) return false;
@@ -170,7 +217,7 @@ async function save(backend, text, operations) {
 // Возвращает { status: 'empty' } | { status: 'ok', state } | { status: 'broken', reason }.
 // У «не целы» из-за того, что хранилище не ответило, есть ещё retry: true —
 // данные могут быть в порядке, нужно прочитать заново, а не стирать.
-async function load(backend) {
+async function load(backend, memory) {
   let manifestText;
   try {
     manifestText = present(await backend.get(MANIFEST));
@@ -193,6 +240,13 @@ async function load(backend) {
     if (!sound) return { status: 'broken', reason: 'главная запись повреждена' };
     if (manifest.v !== FORMAT) {
       return { status: 'broken', reason: `данные записаны более новой версией приложения (формат ${manifest.v})` };
+    }
+    // В облаке главная запись более старого поколения, чем мы записали сами:
+    // опоздавшая запись затёрла новую. Части нашего поколения на месте (старые
+    // убираются только после подтверждённого чтения), так что возвращаем свою.
+    if (memory.last && newer(memory.last.gen, manifest.gen)) {
+      await backend.set(MANIFEST, memory.last.text, settled(memory.last.gen));
+      manifest = JSON.parse(memory.last.text);
     }
 
     const pieces = [];
@@ -232,20 +286,43 @@ async function erase(backend) {
 // Записи идут строго по очереди: две одновременные не перемешают ключи.
 export function createStore(backend) {
   let queue = Promise.resolve();
+  // Последнее, что мы записали сами: по нему замечается опоздавшая чужая запись.
+  const memory = { last: null, time: 0 };
+  // Сохранение, которое стоит в очереди и ещё не началось: новое состояние
+  // заменяет его, и пишется одно последнее. Промежуточные записывать незачем,
+  // а при медленном облаке они выстроились бы друг за другом.
+  let waiting = null;
   const inOrder = (task) => {
     const result = queue.then(task);
     queue = result.catch(() => {});
     return result;
   };
   return {
-    load: () => inOrder(() => load(backend)),
+    load: () => inOrder(() => load(backend, memory)),
     // Состояние снимается сразу, в момент вызова, а не когда дойдёт очередь.
     save: (state) => {
       const text = JSON.stringify(state);
       const operations = state.operations.length;
-      return inOrder(() => save(backend, text, operations));
+      if (waiting !== null) {
+        waiting.text = text;
+        waiting.operations = operations;
+        return waiting.result;
+      }
+      const job = { text, operations };
+      waiting = job;
+      job.result = inOrder(() => {
+        waiting = null;
+        return save(backend, job.text, job.operations, memory);
+      });
+      return job.result;
     },
-    erase: () => inOrder(() => erase(backend)),
+    erase: () => {
+      waiting = null;
+      return inOrder(async () => {
+        await erase(backend);
+        memory.last = null;
+      });
+    },
   };
 }
 
@@ -266,13 +343,14 @@ export function localBackend(storage, prefix = 'crypto-portfolio-app/') {
 }
 
 // Облако Телеграма: колбэки «ошибка первым аргументом», как в документации.
-// Клиент может не ответить вовсе (на живом облаке так бывает и со значением,
-// которое минуту назад прошло); без срока ожидания приложение зависло бы на
-// чтении. Срок — 7 секунд: исправные вызовы на живом облаке заняли от 79 до
-// 342 мс и один 3410 мс, а повисшие за 20 секунд не ответили ни разу, то есть
-// любой срок между 3,4 и 20 секундами сообщает то же самое; взято вдвое больше
-// самого долгого исправного. Не ответил — это не «записано» и не «не записано»:
-// запись при этом перечитывается (см. set), чтение просто ошибка.
+// Клиент может не ответить вовсе; без срока ожидания приложение зависло бы на
+// чтении. Что измерено на живом облаке (один iPhone): обычные вызовы отвечают за
+// 70–340 мс; примерно каждая десятая запись отвечает через 3–7 с (один раз
+// через 9 с) или не отвечает совсем, причём часть таких записей всё же ложится.
+// Срок 7 с выбран владельцем и не подбирался: после срока исход всё равно
+// узнаётся перечитыванием и повтором (см. set), так что срок влияет только на то,
+// как долго висит «Сохраняю…», а не на сохранность данных.
+const RETRIES = 2;
 export function telegramBackend(cloud, timeoutMs = 7000) {
   const call = (method, ...args) => new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(Object.assign(new Error('Телеграм не ответил'), { silent: true })), timeoutMs);
@@ -288,20 +366,26 @@ export function telegramBackend(cloud, timeoutMs = 7000) {
   return {
     get: async (key) => present(await call('getItem', key)),
     // Молчание не объявляем ни успехом, ни провалом: смотрим, что лежит под
-    // ключом. Лежит наше — записано. Нет — пишем ещё раз (тот же ключ и то же
-    // значение, повтор ничего не портит). Ответа нет и со второго раза — ошибка.
-    // Ошибку, которую облако прислало само, не повторяем: это определённый отказ.
-    set: async (key, value) => {
-      try {
-        confirmed(await call('setItem', key, value));
-        return;
-      } catch (error) {
-        if (!error.silent) throw error;
+    // ключом. isDone решает, считать ли прочитанное исходом «записано» (по
+    // умолчанию — то, что мы писали; для главной записи ещё и более новая
+    // чужая). Нет — пишем ещё раз (тот же ключ и то же значение, повтор ничего
+    // не портит), всего не больше двух повторов, и после последнего тоже
+    // смотрим. На живом облаке примерно половина записей без ответа не
+    // находилась и через десять секунд, а часть находилась: одного
+    // перечитывания мало. Ошибку, которую облако прислало само, не повторяем.
+    set: async (key, value, isDone = (read) => read === value) => {
+      for (let attempt = 0; attempt <= RETRIES; attempt++) {
+        try {
+          confirmed(await call('setItem', key, value));
+          return;
+        } catch (error) {
+          if (!error.silent) throw error;
+        }
+        try {
+          if (isDone(present(await call('getItem', key)))) return;
+        } catch { /* перечитать не вышло — как «не нашли» */ }
       }
-      try {
-        if ((await call('getItem', key)) === value) return;
-      } catch { /* перечитать не вышло — пробуем записать ещё раз */ }
-      confirmed(await call('setItem', key, value));
+      throw new Error('Телеграм не ответил');
     },
     remove: async (keys) => { if (keys.length > 0) confirmed(await call('removeItems', keys)); },
     keys: () => call('getKeys'),

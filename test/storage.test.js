@@ -674,10 +674,28 @@ test('запись промолчала и значения нет: один п�
   assert.equal(cloud.data.get('k'), 'v');
 });
 
-test('запись молчит и со второго раза: ошибка, больше двух попыток нет', async () => {
-  const cloud = mutingCloud({ silentSets: [1, 2, 3], stored: false });
+test('запись молчит три раза подряд: ошибка, и записей было ровно три (запись и два повтора)', async () => {
+  const cloud = mutingCloud({ silentSets: [1, 2, 3, 4], stored: false });
   await assert.rejects(telegramBackend(cloud, 20).set('k', 'v'), /не ответил/);
-  assert.equal(cloud.attempts(), 2);
+  assert.equal(cloud.attempts(), 3);
+});
+
+test('второй повтор записывает: молчание дважды ещё не отказ', async () => {
+  const cloud = mutingCloud({ silentSets: [1, 2], stored: false });
+  await telegramBackend(cloud, 20).set('k', 'v');
+  assert.equal(cloud.attempts(), 3);
+  assert.equal(cloud.data.get('k'), 'v');
+});
+
+test('после последнего молчания значение всё равно перечитывается: легло — успех', async () => {
+  // Первые две записи теряются, третья ложится, но подтверждение не приходит.
+  const cloud = fakeCloud();
+  const inner = cloud.setItem;
+  let calls = 0;
+  cloud.setItem = (key, value) => { calls += 1; if (calls === 3) inner(key, value, () => {}); };
+  await telegramBackend(cloud, 20).set('k', 'v');
+  assert.equal(calls, 3);
+  assert.equal(cloud.data.get('k'), 'v');
 });
 
 test('облако само ответило отказом: не повторяем', async () => {
@@ -726,4 +744,206 @@ test('свежую запись другой вкладки уборка по в
   await createStore(backend).save({ operations: history(), names: {} });
   assert.ok(cloud.data.has(fresh), 'десять минут назад — могла идти запись другой вкладки');
   assert.ok(!cloud.data.has(old), 'три часа назад — её никто не допишет');
+});
+
+// --- Защита от потерянных и опоздавших записей ---
+
+const stamp = (ms) => ms.toString(36).padStart(9, '0') + 'abcdefghijkl';
+
+test('главную запись заменила более новая чужая: наша запись считается лёгшей, повторов нет', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 9, 27, 12) });
+  const cloud = mutingCloud({ silentSets: [2], stored: false }); // 1 — часть, 2 — главная запись
+  const backend = telegramBackend(cloud, 20);
+  // Другая вкладка успела записать главную запись с более новым поколением.
+  const theirs = stamp(Date.UTC(2026, 9, 27, 12, 0, 5));
+  const other = { v: 1, gen: theirs, chunks: 1, ops: 1, sha: 'a'.repeat(64) };
+  cloud.data.set('m', JSON.stringify(other));
+  await createStore(backend).save({ operations: history(), names: {} });
+  assert.equal(cloud.attempts(), 2, 'часть и главная запись, без повторов');
+  assert.equal(JSON.parse(cloud.data.get('m')).gen, theirs, 'чужую более новую главную запись не перебили');
+});
+
+test('главная запись старше нашей (опоздавшая запись): чтение возвращает нашу и чинит облако', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 9, 27, 12) });
+  const cloud = fakeCloud();
+  const store = createStore(telegramBackend(cloud));
+  const first = history().slice(0, 3);
+  await store.save({ operations: first, names: {} });
+  const late = cloud.data.get('m');
+  t.mock.timers.setTime(Date.UTC(2026, 9, 27, 12, 0, 10));
+  await store.save({ operations: history(), names: {} });
+  const ours = cloud.data.get('m');
+  assert.notEqual(late, ours);
+  // Опоздавшая запись первого сохранения доходит после второго.
+  cloud.data.set('m', late);
+  const loaded = await store.load();
+  assert.equal(loaded.status, 'ok', loaded.reason);
+  assert.equal(loaded.state.operations.length, history().length, 'вернулось новое состояние, а не опоздавшее старое');
+  assert.equal(cloud.data.get('m'), ours, 'главная запись в облаке починена');
+});
+
+test('опоздавшая запись затёрла главную запись, пока шло следующее сохранение: прошлое поколение берётся из памяти', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 9, 27, 12) });
+  const cloud = fakeCloud();
+  const store = createStore(telegramBackend(cloud));
+  await store.save({ operations: history().slice(0, 3), names: {} });
+  const late = cloud.data.get('m');
+  t.mock.timers.setTime(Date.UTC(2026, 9, 27, 12, 0, 10));
+  await store.save({ operations: history(), names: {} });
+  const second = JSON.parse(cloud.data.get('m')).gen;
+  cloud.data.set('m', late);
+  t.mock.timers.setTime(Date.UTC(2026, 9, 27, 12, 0, 20));
+  await store.save({ operations: history().slice(0, 4), names: {} });
+  const owners = new Set([...cloud.data.keys()].filter((key) => key !== 'm').map((key) => key.slice(1, key.indexOf('_'))));
+  assert.equal(owners.size, 1, 'второго поколения, которое было настоящим прошлым, больше нет: ' + [...owners].join(', '));
+  assert.ok(!owners.has(second));
+  assert.equal((await store.load()).status, 'ok');
+});
+
+test('старые части не удаляются, пока главная запись не прочитана из облака', async () => {
+  const cloud = fakeCloud();
+  const store = createStore(telegramBackend(cloud));
+  await store.save({ operations: history().slice(0, 3), names: {} });
+  const before = [...cloud.data.keys()].filter((key) => key !== 'm');
+  // После записи главной записи её чтение не удаётся.
+  const inner = cloud.getItem;
+  let manifestWritten = false;
+  const setItem = cloud.setItem;
+  cloud.setItem = (key, value, callback) => setItem(key, value, (error, result) => { if (key === 'm') manifestWritten = true; callback(error, result); });
+  cloud.getItem = (key, callback) => (manifestWritten && key === 'm' ? queueMicrotask(() => callback('WEBAPP_STORAGE_ERROR')) : inner(key, callback));
+  await store.save({ operations: history(), names: {} });
+  for (const key of before) assert.ok(cloud.data.has(key), `старая часть ${key} на месте`);
+});
+
+test('сохранения, пока идёт первое, сливаются в одно последнее', async () => {
+  const cloud = fakeCloud();
+  const store = createStore(telegramBackend(cloud));
+  // Первое сохранение задерживается на первой записи, чтобы остальные застали его в пути.
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const inner = cloud.setItem;
+  let first = true;
+  cloud.setItem = (key, value, callback) => {
+    if (first) { first = false; gate.then(() => inner(key, value, callback)); } else inner(key, value, callback);
+  };
+  const results = [history().slice(0, 2)].map((operations) => store.save({ operations, names: {} }));
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  results.push(store.save({ operations: history().slice(0, 3), names: {} }), store.save({ operations: history(), names: {} }));
+  release();
+  await Promise.all(results);
+  assert.equal(cloud.setCalls, 4, 'первое сохранение и одно последнее: по две записи, среднее не писалось');
+  const loaded = await store.load();
+  assert.equal(loaded.state.operations.length, history().length, 'в облаке последнее состояние');
+});
+
+test('сохранения в один момент: пишется одно, с последним состоянием', async () => {
+  const cloud = fakeCloud();
+  const store = createStore(telegramBackend(cloud));
+  await Promise.all([history().slice(0, 2), history().slice(0, 3), history()].map((operations) => store.save({ operations, names: {} })));
+  assert.equal(cloud.setCalls, 2);
+  assert.equal((await store.load()).state.operations.length, history().length);
+});
+
+test('сжатые сохранения: отказ сообщается всем ожидающим', async () => {
+  const cloud = fakeCloud({ failOnSet: () => true });
+  const store = createStore(telegramBackend(cloud));
+  const results = [1, 2, 3].map(() => store.save({ operations: history(), names: {} }).then(() => 'ok', () => 'failed'));
+  assert.deepEqual(await Promise.all(results), ['failed', 'failed', 'failed']);
+});
+
+test('стирание забывает последнюю запись: чужое состояние старше нашего не «чинится» нашей главной записью', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 9, 27, 12) });
+  const cloud = fakeCloud();
+  // Состояние A записано раньше (другим устройством) — снимок облака с ним.
+  await createStore(telegramBackend(cloud)).save({ operations: history().slice(0, 3), names: {} });
+  const snapshotOfA = new Map(cloud.data);
+  // Наша вкладка пишет позже (поколение новее) и стирает всё.
+  t.mock.timers.setTime(Date.UTC(2026, 9, 27, 12, 0, 30));
+  const store = createStore(telegramBackend(cloud));
+  await store.save({ operations: history(), names: {} });
+  await store.erase();
+  // Потом в облако ложится состояние A (запись другого устройства): оно должно читаться как есть.
+  cloud.data.clear();
+  for (const [key, value] of snapshotOfA) cloud.data.set(key, value);
+  const loaded = await store.load();
+  assert.equal(loaded.status, 'ok', loaded.reason);
+  assert.equal(loaded.state.operations.length, 3);
+});
+
+test('сразу после записи главная запись оказалась старше нашей: запись ставит свою обратно', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 9, 27, 12) });
+  const cloud = fakeCloud();
+  const store = createStore(telegramBackend(cloud));
+  await store.save({ operations: history().slice(0, 3), names: {} });
+  const late = cloud.data.get('m');
+  t.mock.timers.setTime(Date.UTC(2026, 9, 27, 12, 0, 30));
+  // Опоздавшая запись первого сохранения ложится сразу после главной записи второго.
+  const setItem = cloud.setItem;
+  let overwritten = false;
+  cloud.setItem = (key, value, callback) => setItem(key, value, (error, result) => {
+    if (key === 'm' && !overwritten) { overwritten = true; cloud.data.set('m', late); }
+    callback(error, result);
+  });
+  await store.save({ operations: history(), names: {} });
+  cloud.setItem = setItem;
+  const loaded = await createStore(telegramBackend(cloud)).load();
+  assert.equal(loaded.status, 'ok', loaded.reason);
+  assert.equal(loaded.state.operations.length, history().length, 'в облаке новое состояние, а не опоздавшее старое');
+});
+
+test('часы шагнули назад между сохранениями: новая запись не принимает старую главную запись за свою', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 9, 27, 12) });
+  const cloud = fakeCloud();
+  const store = createStore(telegramBackend(cloud, 20));
+  await store.save({ operations: history().slice(0, 3), names: {} });
+  // Часы ушли на минуту назад, и главная запись нового сохранения не подтверждается: перепроверка
+  // видит старую и не должна принять её за «легло».
+  t.mock.timers.setTime(Date.UTC(2026, 9, 27, 11, 59));
+  const setItem = cloud.setItem;
+  cloud.setItem = (key, value, callback) => { if (key !== 'm') setItem(key, value, callback); };
+  await assert.rejects(store.save({ operations: history(), names: {} }), /не ответил/);
+  cloud.setItem = setItem;
+  const loaded = await createStore(telegramBackend(cloud)).load();
+  assert.equal(loaded.status, 'ok', loaded.reason);
+  assert.equal(loaded.state.operations.length, 3, 'сохранение не объявлено удавшимся, прежнее состояние цело');
+});
+
+test('главная запись не читается, а ключей слишком много: прежнее состояние не сносится', async () => {
+  const cloud = fakeCloud();
+  const backend = telegramBackend(cloud);
+  await createStore(backend).save({ operations: history(), names: {} });
+  for (let i = 0; i < 1005; i++) cloud.data.set(`corphan_${i}`, 'x');
+  const getItem = cloud.getItem;
+  cloud.getItem = (key, callback) => (key === 'm' ? queueMicrotask(() => callback('WEBAPP_STORAGE_ERROR')) : getItem(key, callback));
+  // Главная запись не читается и не пишется: сохранение падает, а прежние части должны остаться.
+  const setItem = cloud.setItem;
+  cloud.setItem = (key, value, callback) => (key === 'm' ? queueMicrotask(() => callback('сбой сети')) : setItem(key, value, callback));
+  await assert.rejects(createStore(backend).save({ operations: [...history(), buy('2026-03-01', 'Binance', '5', '100')], names: {} }));
+  cloud.getItem = getItem;
+  cloud.setItem = setItem;
+  const loaded = await createStore(backend).load();
+  assert.equal(loaded.status, 'ok', loaded.reason);
+  assert.equal(loaded.state.operations.length, history().length);
+});
+
+test('сохранение после стирания не вливается в сохранение до стирания', async () => {
+  const cloud = fakeCloud();
+  const store = createStore(telegramBackend(cloud));
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const inner = cloud.setItem;
+  let first = true;
+  cloud.setItem = (key, value, callback) => {
+    if (first) { first = false; gate.then(() => inner(key, value, callback)); } else inner(key, value, callback);
+  };
+  const results = [store.save({ operations: history().slice(0, 2), names: {} })];
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  results.push(store.save({ operations: history().slice(0, 3), names: {} }));
+  results.push(store.erase());
+  results.push(store.save({ operations: history(), names: {} }));
+  release();
+  await Promise.all(results);
+  const loaded = await store.load();
+  assert.equal(loaded.status, 'ok', loaded.reason);
+  assert.equal(loaded.state.operations.length, history().length, 'сохранение после стирания не потеряно');
 });
