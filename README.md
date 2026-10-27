@@ -4,7 +4,7 @@ Tracks crypto holdings spread across several exchanges and wallets, with the ave
 
 **Open it:** https://vimakushin.github.io/crypto-portfolio-app/
 
-Work in progress: the Telegram Mini App support is written and partly checked inside Telegram, but saving to Telegram's cloud storage has not passed a test on a real device yet, and the interface is in Russian only. See [Status](#status).
+Work in progress. The app can be opened as a Telegram Mini App, but saving there is unfinished (checked on one iPhone only), so it is not ready for everyday use in Telegram. The interface is in Russian only. See [Status](#status).
 
 ## The interesting part
 
@@ -55,14 +55,16 @@ What works today, in a browser:
 
 Not done yet:
 
-- **saving to Telegram's cloud storage is not confirmed to work.** The app detects Telegram and loads its script only then. A first run of `telegram-check.html` on an iPhone (Bot API 9.6) confirmed the four things the storage code assumed: an absent key reads as an empty string, a write is confirmed with `true`, the 4096 limit counts bytes, and the cloud holds no keys other than ours. The same run showed that a write over the limit got no reply at all (no error, no confirmation), and that the storage layer as a whole did not pass against the real cloud. The cause is not known yet; the check page has been rebuilt to log every call and to try values of different sizes, and has not been run again yet;
+- saving to Telegram's cloud storage is only partly done. It was checked with `telegram-check.html` on one iPhone (iOS 18, Telegram Bot API 9.6). Confirmed there: an absent key reads as an empty string; a write is confirmed with `true`; values up to 4096 bytes are accepted, and the limit counts bytes, not characters; the cloud held no keys other than ours. The whole storage layer (save, read back, overwrite, clean-up, erase) passed in the two most recent runs. Other platforms have not been checked;
+- about one write in ten gets a late reply or none. In those two runs, 39 of 400 repeated writes were slow: 14 were answered after 3.3 to 7.3 seconds, and 25 got no answer within 8 seconds. No read failed. A write without a reply has not necessarily failed: of those 25, 16 were stored when the key was read back ten seconds later, and 9 were not. So after a timeout the app reads the key back and writes again if the value is missing. How long to wait, and how to keep a late write from overwriting a newer one, are still being worked out;
 - there is no main screen with positions and averages;
 - entries cannot be edited, only the last one undone;
-- the interface is in Russian only.
+- the interface is in Russian only;
+- how long it takes to enter a purchase on a phone has not been measured.
 
 ## Checking Telegram's cloud storage
 
-`telegram-check.html` runs on the real cloud storage and prints what it observes. It checks the four assumptions above, runs the whole storage layer (save, read back, overwrite, clean-up, erase) and logs every call it makes. If the storage layer fails, it tries values of different sizes and contents to see which one is not accepted. It also times single reads and writes. A final block deliberately writes values over the 4096-byte limit, which Telegram does not answer, and then checks whether ordinary calls still work afterwards; this adds about half a minute. The page reports what it saw; it does not explain why something fails. The output also lists which launch parameter names and communication channel it detected, plus the browser string, language and window size, so look it over before sharing it. The page and its output are in Russian. Point a bot's Mini App address at the page, open it from Telegram, and copy the result. It uses keys starting with `x-chk-` (a prefix the app's own keys cannot have) and tries to remove them at the end; if a run is cut short, the next run removes the leftovers. It does not change the app's own data (it only lists key names) and does not read the user's name or id.
+`telegram-check.html` runs on the real cloud storage and prints what it observes. It checks the four assumptions above, runs the whole storage layer (save, read back, overwrite, clean-up, erase) and logs every call it makes. If the storage layer fails, it tries values of different sizes and contents to see which one is not accepted. It also times single reads and writes, writes the same value over two hundred times to see how often the reply is late or missing and whether the value was stored anyway, and compares writing five chunks one after another with writing them in parallel. A full run takes several minutes. A final block deliberately writes values over the 4096-byte limit, which Telegram does not answer, and then checks whether ordinary calls still work afterwards; this adds about half a minute. The page reports what it saw; it does not explain why something fails. The output also lists which launch parameter names and communication channel it detected, plus the browser string, language and window size, so look it over before sharing it. The page and its output are in Russian. Point a bot's Mini App address at the page, open it from Telegram, and copy the result. It uses keys starting with `x-chk-` (a prefix the app's own keys cannot have) and tries to remove them at the end; if a run is cut short, the next run removes the leftovers. It does not change the app's own data (it only lists key names) and does not read the user's name or id.
 
 ## Running it
 
