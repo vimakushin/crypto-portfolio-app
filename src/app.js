@@ -692,6 +692,10 @@ form.addEventListener('submit', (event) => {
     else document.getElementById(`${firstProblem}-error`).scrollIntoView({ block: 'center' });
     return;
   }
+  if (staleCloud) {
+    text('record-error', 'Данные на другом устройстве изменились. Сначала нажмите «Перечитать» под кнопкой, иначе то, что вы внесёте здесь, затрёт их.');
+    return;
+  }
   const broken = brokenBy(read.operation);
   if (broken) {
     text('record-error', broken);
@@ -940,17 +944,29 @@ function resetView() {
 // но в хранилище их может не быть (а может быть: запись, не получившая ответа,
 // иногда всё же ложится). Нужно, чтобы человек не внёс такую запись второй раз.
 let confirmedCount = 0;
+// Другое устройство сохранилось позже, и здесь показано устаревшее. Пока человек
+// не перечитал, новые записи не принимаются: сохранить их значило бы затереть чужое.
+let staleCloud = false;
+
+// Какие записи не сохранены, — чтобы человеку не пришлось вспоминать.
+function unsavedList() {
+  const names = operations.slice(confirmedCount).map(shortName);
+  return names.length === 0 ? '' : `: ${names.join('; ')}`;
+}
 
 function showSaveState(kind, detail = '') {
   const element = byId('save-state');
-  const failed = kind === 'failed' || kind === 'unavailable';
+  const failed = kind === 'failed' || kind === 'unavailable' || kind === 'stale';
   if (kind === 'saved') confirmedCount = operations.length;
+  staleCloud = kind === 'stale';
   byId('save-again').hidden = kind !== 'failed';
+  byId('reread').hidden = kind !== 'stale';
   element.className = failed ? 'error' : 'hint';
   element.textContent = {
     saving: 'Сохраняю…',
     saved: `Сохранено ${where()}`,
     failed: `Не удалось сохранить: ${detail}. Запись не потеряна: она есть на этой странице, вносить её заново не нужно. Нажмите «Сохранить ещё раз» и не закрывайте страницу, пока не появится «Сохранено». Копию можно сохранить в файл ниже.`,
+    stale: `Данные изменились на другом устройстве, а здесь показано устаревшее состояние. Это не сохранено${unsavedList()}. Нажмите «Перечитать», чтобы увидеть актуальные данные, и внесите эти записи заново. Если нужна копия того, что здесь, сначала сохраните её в файл ниже.`,
     unavailable: `${unavailableReason}: записи пропадут при закрытии страницы. Выгрузите их в файл ниже.`,
   }[kind];
 }
@@ -982,7 +998,7 @@ function persist() {
   showSaveState('saving');
   store.save(snapshot()).then(
     () => { if (attempt === saveRun) showSaveState('saved'); },
-    (error) => { if (attempt === saveRun) showSaveState('failed', error.message); },
+    (error) => { if (attempt === saveRun) showSaveState(error.stale ? 'stale' : 'failed', error.message); },
   );
 }
 
@@ -1163,6 +1179,7 @@ byId('import-apply').addEventListener('click', async () => {
 // нет. Два нажатия: первое только спрашивает.
 let resetArmed = false;
 byId('retry').addEventListener('click', () => location.reload());
+byId('reread').addEventListener('click', () => location.reload());
 
 byId('reset').addEventListener('click', async () => {
   const button = byId('reset');

@@ -121,6 +121,20 @@ const deadKeys = (keys, newest) => keys.filter((key) => {
   return generation !== null && rank(generation) < newest;
 });
 
+// Чьё состояние стоит в облаке сейчас: поколение самой новой главной записи;
+// '' — только данные первых версий; null — ничего нет. Его читает и записывает
+// это устройство, и если перед записью там оказалось другое, значит, на другом
+// устройстве данные уже изменились, а у нас показано устаревшее.
+const standing = (keys) => {
+  const top = newestManifestKey(keys);
+  return top !== null ? generationOf(top) : keys.includes(LEGACY_MANIFEST) ? '' : null;
+};
+
+// Слияния историй нет: сохранение, которое затёрло бы чужое более новое
+// состояние, не выполняется и не объявляется удавшимся. Человек перечитывает
+// данные и вносит свои записи заново.
+const staleError = () => Object.assign(new Error('данные изменились на другом устройстве'), { stale: true });
+
 // Ключей в хранилище Телеграма не больше 1024; ближе к этому остатки старых
 // записей мешают новой, и их убирают до неё.
 const CROWDED = 1000;
@@ -130,12 +144,16 @@ const CROWDED = 1000;
 // внести ещё одну, и счёт в главной записи не должен отстать от текста.
 // Бросает ошибку, если сохранить не вышло, и тогда прежнее сохранённое
 // состояние остаётся как было.
-async function save(backend, text, operations) {
+async function save(backend, text, operations, held) {
   const pieces = splitByBytes(text);
   if (pieces.length > MAX_CHUNKS) {
     throw new Error('Данных больше, чем помещается в хранилище: выгрузите их в файл');
   }
   const before = await backend.keys();
+  // Пока человек не перечитал, ничего не пишем: состояние у нас устарело (мы
+  // помним прежнее поколение, и в облаке оно уже другое). Если мы ещё ничего не
+  // читали и не писали (held.generation не задан), сравнивать не с чем.
+  if (held.generation !== undefined && standing(before) !== held.generation) throw staleError();
   // Если ключей накопилось столько, что новая запись упрётся в лимит, убирать
   // заменённое надо до неё, а не после. Убирается только то, что старше самой
   // новой главной записи; без неё (первое сохранение, прежние данные в старом
@@ -172,39 +190,47 @@ async function save(backend, text, operations) {
   // облака. Не прочиталась — не убираем, подметёт следующее сохранение. Не
   // вышло убрать — не беда: лишние ключи ничему не мешают. Главная запись
   // другой вкладки, если она новее нашей, остаётся вместе со своими частями.
+  // Если за это время в облаке появилось более новое состояние, наше сохранение
+  // проиграло: оно не объявляется удавшимся (устаревшее наше убирается).
+  let newestNow = generation;
   try {
-    if (present(await backend.get(manifestKey)) !== manifestText) return;
+    if (present(await backend.get(manifestKey)) !== manifestText) {
+      held.generation = generation;
+      return;
+    }
     const keys = await backend.keys();
     const top = newestManifestKey(keys);
-    const newestNow = top !== null && generationOf(top) > generation ? generationOf(top) : generation;
+    if (top !== null && generationOf(top) > generation) newestNow = generationOf(top);
     await backend.remove(deadKeys(keys, newestNow));
   } catch {
     // см. выше
   }
+  if (newestNow !== generation) throw staleError();
+  held.generation = generation;
 }
 
 // Возвращает { status: 'empty' } | { status: 'ok', state } | { status: 'broken', reason }.
 // У «не целы» из-за того, что хранилище не ответило, есть ещё retry: true —
 // данные могут быть в порядке, нужно прочитать заново, а не стирать.
-async function load(backend) {
+async function load(backend, held) {
   // Часть пропала, пока мы читали: другое устройство могло сохраниться и убрать
   // старое. Один раз читаем с самого начала; пропала и во второй раз — данные
   // действительно не целы.
-  const result = await readOnce(backend);
+  const result = await readOnce(backend, held);
   if (!result.missing) return result;
-  const again = await readOnce(backend);
+  const again = await readOnce(backend, held);
   delete again.missing;
   return again;
 }
 
-async function readOnce(backend) {
+async function readOnce(backend, held) {
   try {
     const keys = await backend.keys();
     const manifestKey = newestManifestKey(keys) ?? (keys.includes(LEGACY_MANIFEST) ? LEGACY_MANIFEST : null);
     if (manifestKey === null) {
       return keys.some(isChunkKey)
         ? { status: 'broken', reason: 'найдены части данных, но нет главной записи о них (если это самая первая запись, оборванная при закрытии страницы, потеряна только она; если нет — данные повреждены)' }
-        : { status: 'empty' };
+        : (held.generation = null, { status: 'empty' });
     }
     const manifestText = present(await backend.get(manifestKey));
     if (manifestText === null) {
@@ -246,6 +272,7 @@ async function readOnce(backend) {
     if (!Array.isArray(state?.operations) || state.operations.length !== manifest.ops) {
       return { status: 'broken', reason: 'число операций не совпало с записанным' };
     }
+    held.generation = standing(keys);
     return { status: 'ok', state };
   } catch (error) {
     // Не смогли прочитать — не значит, что данных нет. Пустым это не считаем.
@@ -254,17 +281,20 @@ async function readOnce(backend) {
 }
 
 // Всё, что приложение положило в хранилище.
-async function erase(backend) {
+async function erase(backend, held) {
   const keys = (await backend.keys()).filter((key) => generationOf(key) !== null);
   // Главные записи первыми: оборвётся посередине — останутся части без них,
   // а это уже «не целы», а не «целы».
   const manifests = keys.filter((key) => key === LEGACY_MANIFEST || isManifestKey(key));
   await backend.remove([...manifests, ...keys.filter((key) => !manifests.includes(key))]);
+  held.generation = null;
 }
 
 // Записи идут строго по очереди: две одновременные не перемешают ключи.
 export function createStore(backend) {
   let queue = Promise.resolve();
+  // Какое поколение мы последним прочитали или записали (undefined — никакое).
+  const held = { generation: undefined };
   // Сохранение, которое стоит в очереди и ещё не началось: новое состояние
   // заменяет его, и пишется одно последнее. Промежуточные записывать незачем,
   // а при медленном облаке они выстроились бы друг за другом.
@@ -275,7 +305,7 @@ export function createStore(backend) {
     return result;
   };
   return {
-    load: () => inOrder(() => load(backend)),
+    load: () => inOrder(() => load(backend, held)),
     // Состояние снимается сразу, в момент вызова, а не когда дойдёт очередь.
     save: (state) => {
       const text = JSON.stringify(state);
@@ -289,13 +319,13 @@ export function createStore(backend) {
       waiting = job;
       job.result = inOrder(() => {
         waiting = null;
-        return save(backend, job.text, job.operations);
+        return save(backend, job.text, job.operations, held);
       });
       return job.result;
     },
     erase: () => {
       waiting = null;
-      return inOrder(() => erase(backend));
+      return inOrder(() => erase(backend, held));
     },
   };
 }

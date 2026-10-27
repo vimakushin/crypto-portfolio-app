@@ -540,10 +540,13 @@ test('две вкладки пишут одновременно: сохранё�
       const a = mk(sizeA, 'Вкладка-А');
       const b = mk(sizeB, 'Вкладка-Б');
       if (seeded) await createStore(telegramBackend(cloud)).save({ operations: mk(50, 'Раньше'), names: {} });
-      await Promise.all([
+      const results = await Promise.allSettled([
         createStore(telegramBackend(cloud)).save({ operations: a, names: {} }),
         createStore(telegramBackend(cloud)).save({ operations: b, names: {} }),
       ]);
+      // Проигравший не получает «сохранено»: либо он отказан как устаревший, либо оба прошли друг за другом.
+      for (const result of results) if (result.status === 'rejected') assert.equal(result.reason.stale, true, String(result.reason));
+      assert.ok(results.some((result) => result.status === 'fulfilled'));
       const loaded = await createStore(telegramBackend(cloud)).load();
       assert.equal(loaded.status, 'ok', `${sizeA}/${sizeB}${seeded ? ' поверх прежнего' : ''}: ${loaded.reason}`);
       assert.ok([a, b].some((candidate) => JSON.stringify(candidate) === JSON.stringify(loaded.state.operations)));
@@ -836,7 +839,7 @@ test('старое не удаляется, пока новая главная �
   for (const key of before) assert.ok(cloud.data.has(key), `старый ключ ${key} на месте`);
 });
 
-test('запись другого устройства, появившаяся во время нашей, не стирается', async () => {
+test('запись другого устройства, появившаяся во время нашей, не стирается, а наше сохранение отказано как устаревшее', async () => {
   const cloud = fakeCloud();
   const store = createStore(telegramBackend(cloud));
   const theirs = await savedCloud(history().slice(0, 3)); // готовое состояние другого устройства
@@ -853,7 +856,7 @@ test('запись другого устройства, появившаяся �
       else cloud.data.set(`c${gen}${k.slice(k.indexOf('_'))}`, v);
     }
   };
-  await store.save({ operations: history(), names: {} });
+  await assert.rejects(store.save({ operations: history(), names: {} }), (error) => error.stale === true);
   const loaded = await createStore(telegramBackend(cloud)).load();
   assert.equal(loaded.status, 'ok', loaded.reason);
   assert.equal(loaded.state.operations.length, 3, 'читается более новое состояние другого устройства, целым');
@@ -958,3 +961,96 @@ test('ключ m_… без времени в имени не считается
   assert.equal((await loadFrom(cloud)).state.operations.length, 3);
 });
 
+
+// --- Данные изменились на другом устройстве ---
+
+// Два устройства на одном облаке: каждое читает своё и пишет своё.
+function twoDevices() {
+  const cloud = fakeCloud();
+  return { cloud, mine: createStore(telegramBackend(cloud)), other: createStore(telegramBackend(cloud)) };
+}
+
+test('другое устройство сохранилось позже: наше сохранение отказано, не объявлено удавшимся, чужое цело', async () => {
+  const { cloud, mine, other } = twoDevices();
+  await mine.save({ operations: history().slice(0, 2), names: {} });
+  await other.load();
+  await mine.load();
+  await other.save({ operations: history().slice(0, 3), names: {} });
+  await assert.rejects(mine.save({ operations: history(), names: {} }), (error) => error.stale === true && /другом устройстве/.test(error.message));
+  const loaded = await createStore(telegramBackend(cloud)).load();
+  assert.equal(loaded.state.operations.length, 3, 'в облаке осталось состояние другого устройства');
+});
+
+test('после отказа следующие сохранения не пишут ничего, пока не перечитали; потом снова работают', async () => {
+  const { cloud, mine, other } = twoDevices();
+  await mine.save({ operations: history().slice(0, 2), names: {} });
+  await other.load();
+  await other.save({ operations: history().slice(0, 3), names: {} });
+  await assert.rejects(mine.save({ operations: history(), names: {} }), (error) => error.stale);
+  const writes = cloud.setCalls;
+  // Даже если облако опять совпало бы, пока человек не перечитал, молча писать нельзя.
+  await assert.rejects(mine.save({ operations: history(), names: {} }), (error) => error.stale);
+  assert.equal(cloud.setCalls, writes, 'ни одной записи в облако');
+  const reread = await mine.load();
+  assert.equal(reread.state.operations.length, 3);
+  await mine.save({ operations: history(), names: {} });
+  assert.equal((await createStore(telegramBackend(cloud)).load()).state.operations.length, history().length);
+});
+
+test('чужое сохранение появилось между нашим просмотром ключей и записью: проигрываем, не «сохранено»', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.UTC(2026, 9, 27, 12) });
+  const { cloud, mine, other } = twoDevices();
+  await mine.save({ operations: history().slice(0, 2), names: {} });
+  await other.load();
+  const inner = cloud.setItem;
+  let injected = false;
+  cloud.setItem = (key, value, callback) => {
+    if (injected || !key.startsWith('c')) return inner(key, value, callback);
+    injected = true;
+    // Пока наша первая часть в пути, другое устройство сохраняется целиком (и позже нас по часам).
+    t.mock.timers.setTime(Date.UTC(2026, 9, 27, 12, 0, 10));
+    other.save({ operations: history().slice(0, 3), names: {} }).then(() => inner(key, value, callback));
+  };
+  await assert.rejects(mine.save({ operations: history(), names: {} }), (error) => error.stale === true);
+  cloud.setItem = inner;
+  const loaded = await createStore(telegramBackend(cloud)).load();
+  assert.equal(loaded.status, 'ok', loaded.reason);
+  assert.equal(loaded.state.operations.length, 3, 'читается целое состояние другого устройства');
+  assert.equal([...cloud.data.keys()].filter((key) => key.startsWith('m_')).length, 1, 'наше устаревшее убрано');
+});
+
+test('мы читали пустое облако, а другое устройство успело записать: наше первое сохранение отказано', async () => {
+  const { mine, other } = twoDevices();
+  assert.deepEqual(await mine.load(), { status: 'empty' });
+  await other.save({ operations: history().slice(0, 3), names: {} });
+  await assert.rejects(mine.save({ operations: history(), names: {} }), (error) => error.stale);
+});
+
+test('свои сохранения подряд проходят: прочитали, записали, записали ещё', async () => {
+  const { mine } = twoDevices();
+  await mine.load();
+  await mine.save({ operations: history().slice(0, 2), names: {} });
+  await mine.save({ operations: history().slice(0, 3), names: {} });
+  await mine.save({ operations: history(), names: {} });
+  assert.equal((await mine.load()).state.operations.length, history().length);
+});
+
+test('после стирания устройство снова пишет: пустое облако — это то, что оно знает', async () => {
+  const { mine } = twoDevices();
+  await mine.save({ operations: history(), names: {} });
+  await mine.erase();
+  await mine.save({ operations: history().slice(0, 2), names: {} });
+  assert.equal((await mine.load()).state.operations.length, 2);
+});
+
+test('данные первых версий прочитаны: первое сохранение не считается устаревшим', async () => {
+  const cloud = fakeCloud();
+  const text = JSON.stringify({ operations: history().slice(0, 3), names: {} });
+  const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))].map((b) => b.toString(16).padStart(2, '0')).join('');
+  cloud.data.set('cabc123def456_0', text);
+  cloud.data.set('m', JSON.stringify({ v: 1, gen: 'abc123def456', chunks: 1, ops: 3, sha: digest }));
+  const store = createStore(telegramBackend(cloud));
+  await store.load();
+  await store.save({ operations: history(), names: {} });
+  assert.equal((await store.load()).state.operations.length, history().length);
+});
