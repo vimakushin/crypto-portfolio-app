@@ -22,7 +22,7 @@ The rules have tests (`test/calc.test.js`):
 - a transfer with a fee raises it to the total invested divided by the coins that remain (to within 10⁻²⁰);
 - a sale does not change the average of the portfolio it was sold from (to within 10⁻²⁰). The overall average can still move, because the mix of portfolios has changed; keeping both levels fixed at once is impossible, and the code explains why.
 
-## Decisions behind it
+## Design decisions
 
 **The data belongs to the user.** There is no server of its own and no separate account. The only requests that leave the device are for current prices and coin search, sent directly to the CoinGecko public API (CoinGecko sees the coin ids and the search text). Opened inside Telegram, the page also loads Telegram's own script from telegram.org, and the history is saved in Telegram's cloud storage instead of the browser; opened in an ordinary browser, it does not contact telegram.org at all.
 
@@ -30,7 +30,7 @@ The rules have tests (`test/calc.test.js`):
 
 **It uses nothing from Telegram except the cloud storage.** Telegram hands a Mini App the user's name and id (`initData`). The app does not use, keep or send it (Telegram's own script holds it for the tab). To tell whether the page is running inside Telegram before Telegram's script is loaded, the app checks only whether two launch parameter names are present (in the address, or in what Telegram's script saved for the tab) and whether the channel Telegram uses to talk to the page exists. It does not use the values.
 
-**It does not ask for exchange API keys, seed phrases or private keys.** Holdings are entered by hand. Connecting to exchanges would mean storing its users' access keys, and that was ruled out from the start.
+**It does not ask for exchange API keys, seed phrases or private keys.** Holdings are entered by hand. Connecting to exchanges is out of scope: it would mean storing users' access keys.
 
 **Amounts are fixed-point integers, not floating-point numbers.** Every amount and quantity is a `BigInt` counted in units of 10⁻³⁰. Addition and subtraction are exact; division rounds at the 30th decimal place. One tolerance exists: a sale or transfer that differs from the whole position by less than 10⁻²⁶ of a coin is treated as the whole position. That is why the transfer test above can require exact equality.
 
@@ -40,7 +40,7 @@ The rules have tests (`test/calc.test.js`):
 
 **If the calculation fails, nothing is shown for that coin.** A wrong average looks like any other number, and people rarely double-check it. An entry that cannot be applied (selling more than the portfolio holds, a date that does not exist) stops the calculation for that coin only, and the error names the entry that caused it. In the entry form, a backdated entry that would break a later one is refused before it is saved.
 
-**Incomplete data is reported, not calculated.** Entries are stored as the original records, not as results. The storage that Telegram offers takes at most 4096 characters per key and cannot write several keys at once, so the history is split into chunks, and a half-finished write must never become the current state. A save writes the new chunks under new keys first, then one manifest key (chunk count, entry count, SHA-256 of the whole text), and only then deletes the old chunks. If a write breaks off at any step, the manifest still points to the previous complete state. On reading, a missing chunk, a checksum that does not match, or a count that differs from the manifest means the data is incomplete: the app says so, shows no averages, and accepts no new entries that would overwrite what is left. The tests cut a save short at each write and check that what is read back is either the old state or the new one, never a mix. Two tabs saving at the same moment are not coordinated: one save wins and the other is lost whole, never half-applied.
+**Incomplete data is reported, not calculated.** Entries are stored as the original records, not as results. The storage that Telegram offers takes at most 4096 characters per key and cannot write several keys at once, so the history is split into chunks, and a half-finished write must never become the current state. A save writes the new chunks under new keys first, then one manifest key (chunk count, entry count, SHA-256 of the whole text), and only then deletes the old chunks. If a write breaks off at any step, the manifest still points to the previous complete state. On reading, a missing chunk, a checksum that does not match, or a count that differs from the manifest means the data is incomplete: the app says so, shows no averages, and accepts no new entries that would overwrite what is left. Each of these failure modes has a test, run against a fake of Telegram's storage: a save is cut short at every step, and what is read back is either the old state or the new one, never a mix; a chunk is removed or altered, the manifest is damaged, or the entry count differs from the manifest, and the read reports the data as incomplete. Two tabs saving at the same moment are not coordinated: one save wins and the other is lost whole, never half-applied.
 
 ## Status
 
@@ -87,3 +87,5 @@ Prices: [CoinGecko](https://www.coingecko.com).
 ## License
 
 [MIT](LICENSE)
+
+For how analysis work is run on a different project, crypto-signal-agent, see [How the work is done](https://github.com/vimakushin/vimakushin/blob/main/how-the-work-is-done.md).
