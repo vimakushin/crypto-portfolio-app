@@ -13,10 +13,13 @@
 // новое, потом один переключатель»:
 //
 //   1. новые части пишутся под новыми ключами (старые данные не трогаются);
-//   2. пишется главная запись — один ключ: сколько частей, сколько операций
-//      и контрольная сумма всего текста. Это и есть момент, когда новое
-//      состояние становится текущим;
-//   3. только потом удаляются части прошлого состояния.
+//   2. пишется главная запись — один ключ m_<поколение>: сколько частей,
+//      сколько операций и контрольная сумма всего текста. Это и есть момент,
+//      когда новое состояние становится текущим (читается самая новая главная
+//      запись). Ключ у каждого сохранения свой, поэтому запись, которая дошла
+//      до облака с опозданием, ложится под свой ключ и новую не затирает;
+//   3. только потом, прочитав новую главную запись обратно, удаляется всё,
+//      что старше неё: части и главные записи прошлых сохранений.
 //
 // Оборвалась запись на любом шаге — главная запись по-прежнему указывает на
 // целое прошлое состояние. А чтение не верит ничему на слово: нет части,
@@ -33,10 +36,15 @@ export const CHUNK_BYTES = 4096;
 // (старая и новая) и главная запись: 2·500 + 1 = 1001.
 export const MAX_CHUNKS = 500;
 
-const MANIFEST = 'm';
+// Главная запись лежит под ключом m_<поколение>. Просто «m» — так её клали
+// первые версии: если новых главных записей нет, читается она, а первое же
+// сохранение её убирает.
+const MANIFEST_PREFIX = 'm_';
+const LEGACY_MANIFEST = 'm';
 const FORMAT = 1;
 const chunkKey = (generation, index) => `c${generation}_${index}`;
 const isChunkKey = (key) => /^c[a-z0-9]+_\d+$/.test(key);
+const isManifestKey = (key) => /^m_[a-z0-9]+$/.test(key);
 
 // Облако Телеграма отдаёт пустую строку и для отсутствующего ключа, различить
 // их нельзя, поэтому пустые значения не пишем и читаем как «нет».
@@ -73,72 +81,45 @@ async function checksum(text) {
 }
 
 // Поколение — время создания (9 знаков, миллисекунды в системе счисления 36) и
-// 12 случайных знаков. Время нужно уборке: по нему видно, что часть давно
-// брошена, а не пишется прямо сейчас другой вкладкой. Старые поколения без
-// времени (12 знаков) по возрасту не убираются.
+// 12 случайных знаков. По времени поколения упорядочены: «самое новое» — то,
+// что читается, а всё старше него после подтверждённого сохранения убирается.
+// Поколения старых версий (12 знаков, без времени) старше любого со временем.
 const GENERATION_LENGTH = 21;
-// Время поколения внутри сессии только растёт, даже если часы шагнули назад или
-// две записи пришлись на одну миллисекунду: иначе более новое поколение получило
-// бы имя «старше» и перепроверка приняла бы за «легло» прежнюю главную запись.
-// Между сессиями и устройствами порядок держится на часах как есть.
-function newGeneration(memory) {
-  memory.time = Math.max(Date.now(), memory.time + 1);
-  const bytes = crypto.getRandomValues(new Uint8Array(6));
-  return memory.time.toString(36).padStart(9, '0') + [...bytes].map((byte) => byte.toString(36).padStart(2, '0')).join('');
-}
 const timed = (generation) => typeof generation === 'string' && generation.length === GENERATION_LENGTH;
-const abandoned = (generation) => timed(generation)
-  && Date.now() - parseInt(generation.slice(0, 9), 36) > ABANDONED_AFTER;
+const rank = (generation) => (timed(generation) ? generation : '');
+const timeOf = (generation) => parseInt(generation.slice(0, 9), 36);
 
-// Новее ли a, чем b. Сравнимы только поколения со временем в имени; про старые
-// (без времени) ничего не известно, и ответ «нет».
-const newer = (a, b) => timed(a) && timed(b) && a > b;
-
-// «Главная запись легла»: в облаке лежит наша или более новая. Более новая
-// — это запись другой вкладки или устройства, наша уже успела стать прошлой.
-const settled = (ours) => (text) => {
-  try {
-    const generation = JSON.parse(text)?.gen;
-    return generation === ours || newer(generation, ours);
-  } catch {
-    return false;
-  }
-};
-
-// --- Запись и чтение ---
-
-// Куда указывает главная запись сейчас; null — её нет или она нечитаема.
-// Не удалось прочитать — undefined, и это не то же, что null («записи нет»):
-// по непрочитанному ничего не убираем.
-async function currentGeneration(backend) {
-  let text;
-  try {
-    text = present(await backend.get(MANIFEST));
-  } catch {
-    return undefined;
-  }
-  try {
-    const manifest = JSON.parse(text ?? 'null');
-    return typeof manifest?.gen === 'string' ? manifest.gen : null;
-  } catch {
-    return null;
-  }
+// Новое поколение получает время больше, чем у любого поколения, которое мы
+// видим в облаке: часы могли шагнуть назад или отставать от часов другого
+// устройства, а запись обязана считаться самой новой для всех, кто её увидел.
+// Одновременные записи двух устройств, не видящих друг друга, упорядочиваются
+// как придётся.
+function newGeneration(seen) {
+  const time = Math.max(Date.now(), seen + 1);
+  const bytes = crypto.getRandomValues(new Uint8Array(6));
+  return time.toString(36).padStart(9, '0') + [...bytes].map((byte) => byte.toString(36).padStart(2, '0')).join('');
 }
 
-// Оборвавшиеся записи оставляют части без главной записи. Обычно их
-// убирает следующая запись, но чистка осторожна: часть, которой нет в нашем
-// поколении, может принадлежать записи другой вкладки, которая сейчас идёт.
-// Поэтому убираем поколение, которое мы сами заменили, и поколения старше
-// часа (см. ABANDONED_AFTER), а всё остальное — лишь когда ключей стало так
-// много, что они начинают мешать.
-const SWEEP_ABOVE = 700;
+// Чьё поколение у ключа; null — ключ не наш. Просто «m» — главная запись
+// первых версий, старше любой.
+function generationOf(key) {
+  if (key === LEGACY_MANIFEST) return '';
+  if (isChunkKey(key)) return key.slice(1, key.indexOf('_'));
+  if (isManifestKey(key)) return key.slice(MANIFEST_PREFIX.length);
+  return null;
+}
 
-// Запись из нескольких десятков частей идёт секунды, и час с большим запасом
-// покрывает и медленное облако, и разницу часов на двух устройствах. Часть
-// старше часа, на которую не указывает главная запись, никто уже не допишет:
-// её убирает любая следующая запись, так что неудавшееся удаление не копится
-// и помнить о нём не нужно.
-const ABANDONED_AFTER = 60 * 60 * 1000;
+// Самая новая главная запись среди ключей (новые, со временем в имени).
+const newestManifestKey = (keys) => keys.filter((key) => isManifestKey(key) && timed(generationOf(key))).sort().at(-1) ?? null;
+
+// Ключи старше поколения newest: их заменило более новое сохранение, и читать
+// их уже никто не станет — даже если такая запись дойдёт до облака позже,
+// главной она не станет, потому что есть более новая. Поэтому убирать их можно
+// всегда; ключи новее (запись другой вкладки, которая идёт сейчас) не трогаем.
+const deadKeys = (keys, newest) => keys.filter((key) => {
+  const generation = generationOf(key);
+  return generation !== null && rank(generation) < newest;
+});
 
 // Ключей в хранилище Телеграма не больше 1024; ближе к этому остатки старых
 // записей мешают новой, и их убирают до неё.
@@ -149,22 +130,22 @@ const CROWDED = 1000;
 // внести ещё одну, и счёт в главной записи не должен отстать от текста.
 // Бросает ошибку, если сохранить не вышло, и тогда прежнее сохранённое
 // состояние остаётся как было.
-async function save(backend, text, operations, memory) {
+async function save(backend, text, operations) {
   const pieces = splitByBytes(text);
   if (pieces.length > MAX_CHUNKS) {
     throw new Error('Данных больше, чем помещается в хранилище: выгрузите их в файл');
   }
-  const inCloud = await currentGeneration(backend);
-  // Опоздавшая запись прошлого поколения могла затереть главную запись, пока
-  // мы писали следующую: настоящее прошлое состояние — то, что мы записали сами.
-  const previous = memory.last && (inCloud === undefined || newer(memory.last.gen, inCloud)) ? memory.last.gen : inCloud;
-  // Оборвавшиеся записи оставляют части, и если их накопилось столько, что
-  // новая запись упрётся в лимит ключей, убирать их надо до неё, а не после.
   const before = await backend.keys();
-  if (inCloud !== undefined && before.length + pieces.length + 1 > CROWDED) {
-    await backend.remove(before.filter((key) => isChunkKey(key) && key.slice(1, key.indexOf('_')) !== previous)).catch(() => {});
+  // Если ключей накопилось столько, что новая запись упрётся в лимит, убирать
+  // заменённое надо до неё, а не после. Убирается только то, что старше самой
+  // новой главной записи; без неё (первое сохранение, прежние данные в старом
+  // виде) не трогаем ничего.
+  const newest = newestManifestKey(before);
+  if (newest !== null && before.length + pieces.length + 2 > CROWDED) {
+    await backend.remove(deadKeys(before, generationOf(newest))).catch(() => {});
   }
-  const generation = newGeneration(memory);
+  const seen = Math.max(0, ...before.map(generationOf).filter(timed).map(timeOf));
+  const generation = newGeneration(seen);
   const written = [];
   try {
     for (const [index, piece] of pieces.entries()) {
@@ -184,31 +165,19 @@ async function save(backend, text, operations, memory) {
   // true) не повторяется и сразу становится ошибкой записи.
   const manifest = { v: FORMAT, gen: generation, chunks: pieces.length, ops: operations, sha: await checksum(text) };
   const manifestText = JSON.stringify(manifest);
-  await backend.set(MANIFEST, manifestText, settled(generation));
-  memory.last = { gen: generation, text: manifestText };
+  const manifestKey = MANIFEST_PREFIX + generation;
+  await backend.set(manifestKey, manifestText);
 
-  // Старые части убираются только после того, как главная запись прочитана
-  // из облака и это наша или более новая: прочитать не вышло — не убираем, их
-  // подметёт уборка по возрасту. Не вышло убрать — не беда: лишние части ничему
-  // не мешают. Главная запись могла за это время перейти к другой вкладке — её
-  // поколение не трогаем.
-  const current = await currentGeneration(backend);
-  if (current !== generation && !newer(current, generation)) {
-    // Если прочиталась главная запись старше нашей, её затёрла опоздавшая
-    // запись прошлого сохранения: ставим свою обратно. Не прочиталась вовсе
-    // (current === null) — ничего не трогаем, запись уже подтверждена облаком.
-    if (newer(generation, current)) await backend.set(MANIFEST, manifestText, settled(generation));
-    return;
-  }
+  // Старое убирается только после того, как новая главная запись прочитана из
+  // облака. Не прочиталась — не убираем, подметёт следующее сохранение. Не
+  // вышло убрать — не беда: лишние ключи ничему не мешают. Главная запись
+  // другой вкладки, если она новее нашей, остаётся вместе со своими частями.
   try {
-    const keep = new Set([generation, current]);
+    if (present(await backend.get(manifestKey)) !== manifestText) return;
     const keys = await backend.keys();
-    const stale = keys.filter((key) => {
-      if (!isChunkKey(key)) return false;
-      const owner = key.slice(1, key.indexOf('_'));
-      return !keep.has(owner) && (owner === previous || abandoned(owner) || keys.length > SWEEP_ABOVE);
-    });
-    await backend.remove(stale);
+    const top = newestManifestKey(keys);
+    const newestNow = top !== null && generationOf(top) > generation ? generationOf(top) : generation;
+    await backend.remove(deadKeys(keys, newestNow));
   } catch {
     // см. выше
   }
@@ -217,14 +186,18 @@ async function save(backend, text, operations, memory) {
 // Возвращает { status: 'empty' } | { status: 'ok', state } | { status: 'broken', reason }.
 // У «не целы» из-за того, что хранилище не ответило, есть ещё retry: true —
 // данные могут быть в порядке, нужно прочитать заново, а не стирать.
-async function load(backend, memory) {
-  let manifestText;
+async function load(backend) {
   try {
-    manifestText = present(await backend.get(MANIFEST));
+    const keys = await backend.keys();
+    const manifestKey = newestManifestKey(keys) ?? (keys.includes(LEGACY_MANIFEST) ? LEGACY_MANIFEST : null);
+    if (manifestKey === null) {
+      return keys.some(isChunkKey)
+        ? { status: 'broken', reason: 'найдены части данных, но нет главной записи о них (если это самая первая запись, оборванная при закрытии страницы, потеряна только она; если нет — данные повреждены)' }
+        : { status: 'empty' };
+    }
+    const manifestText = present(await backend.get(manifestKey));
     if (manifestText === null) {
-      const orphans = (await backend.keys()).filter(isChunkKey);
-      return orphans.length === 0 ? { status: 'empty' }
-        : { status: 'broken', reason: 'найдены части данных, но нет главной записи о них (если это самая первая запись, оборванная при закрытии страницы, потеряна только она; если нет — данные повреждены)' };
+      return { status: 'broken', retry: true, reason: 'главная запись исчезла во время чтения (её могла заменить другая вкладка)' };
     }
 
     let manifest;
@@ -236,17 +209,11 @@ async function load(backend, memory) {
     const sound = manifest !== null && typeof manifest === 'object'
       && Number.isInteger(manifest.chunks) && manifest.chunks >= 1 && manifest.chunks <= MAX_CHUNKS
       && Number.isInteger(manifest.ops) && manifest.ops >= 0
-      && /^[a-z0-9]+$/.test(manifest.gen ?? '') && /^[0-9a-f]{64}$/.test(manifest.sha ?? '');
+      && /^[a-z0-9]+$/.test(manifest.gen ?? '') && /^[0-9a-f]{64}$/.test(manifest.sha ?? '')
+      && (manifestKey === LEGACY_MANIFEST || manifest.gen === generationOf(manifestKey));
     if (!sound) return { status: 'broken', reason: 'главная запись повреждена' };
     if (manifest.v !== FORMAT) {
       return { status: 'broken', reason: `данные записаны более новой версией приложения (формат ${manifest.v})` };
-    }
-    // В облаке главная запись более старого поколения, чем мы записали сами:
-    // опоздавшая запись затёрла новую. Части нашего поколения на месте (старые
-    // убираются только после подтверждённого чтения), так что возвращаем свою.
-    if (memory.last && newer(memory.last.gen, manifest.gen)) {
-      await backend.set(MANIFEST, memory.last.text, settled(memory.last.gen));
-      manifest = JSON.parse(memory.last.text);
     }
 
     const pieces = [];
@@ -277,17 +244,16 @@ async function load(backend, memory) {
 
 // Всё, что приложение положило в хранилище.
 async function erase(backend) {
-  const keys = (await backend.keys()).filter((key) => key === MANIFEST || isChunkKey(key));
-  // Главная запись первой: оборвётся посередине — останутся части без неё,
+  const keys = (await backend.keys()).filter((key) => generationOf(key) !== null);
+  // Главные записи первыми: оборвётся посередине — останутся части без них,
   // а это уже «не целы», а не «целы».
-  await backend.remove([MANIFEST, ...keys.filter((key) => key !== MANIFEST)]);
+  const manifests = keys.filter((key) => key === LEGACY_MANIFEST || isManifestKey(key));
+  await backend.remove([...manifests, ...keys.filter((key) => !manifests.includes(key))]);
 }
 
 // Записи идут строго по очереди: две одновременные не перемешают ключи.
 export function createStore(backend) {
   let queue = Promise.resolve();
-  // Последнее, что мы записали сами: по нему замечается опоздавшая чужая запись.
-  const memory = { last: null, time: 0 };
   // Сохранение, которое стоит в очереди и ещё не началось: новое состояние
   // заменяет его, и пишется одно последнее. Промежуточные записывать незачем,
   // а при медленном облаке они выстроились бы друг за другом.
@@ -298,7 +264,7 @@ export function createStore(backend) {
     return result;
   };
   return {
-    load: () => inOrder(() => load(backend, memory)),
+    load: () => inOrder(() => load(backend)),
     // Состояние снимается сразу, в момент вызова, а не когда дойдёт очередь.
     save: (state) => {
       const text = JSON.stringify(state);
@@ -312,16 +278,13 @@ export function createStore(backend) {
       waiting = job;
       job.result = inOrder(() => {
         waiting = null;
-        return save(backend, job.text, job.operations, memory);
+        return save(backend, job.text, job.operations);
       });
       return job.result;
     },
     erase: () => {
       waiting = null;
-      return inOrder(async () => {
-        await erase(backend);
-        memory.last = null;
-      });
+      return inOrder(() => erase(backend));
     },
   };
 }
@@ -366,14 +329,12 @@ export function telegramBackend(cloud, timeoutMs = 7000) {
   return {
     get: async (key) => present(await call('getItem', key)),
     // Молчание не объявляем ни успехом, ни провалом: смотрим, что лежит под
-    // ключом. isDone решает, считать ли прочитанное исходом «записано» (по
-    // умолчанию — то, что мы писали; для главной записи ещё и более новая
-    // чужая). Нет — пишем ещё раз (тот же ключ и то же значение, повтор ничего
-    // не портит), всего не больше двух повторов, и после последнего тоже
-    // смотрим. На живом облаке примерно половина записей без ответа не
+    // ключом. Лежит то, что мы писали, — записано. Нет — пишем ещё раз (тот же
+    // ключ и то же значение, повтор ничего не портит), всего не больше двух
+    // повторов, и после последнего тоже смотрим. На живом облаке примерно половина записей без ответа не
     // находилась и через десять секунд, а часть находилась: одного
     // перечитывания мало. Ошибку, которую облако прислало само, не повторяем.
-    set: async (key, value, isDone = (read) => read === value) => {
+    set: async (key, value) => {
       for (let attempt = 0; attempt <= RETRIES; attempt++) {
         try {
           confirmed(await call('setItem', key, value));
@@ -382,7 +343,7 @@ export function telegramBackend(cloud, timeoutMs = 7000) {
           if (!error.silent) throw error;
         }
         try {
-          if (isDone(present(await call('getItem', key)))) return;
+          if (present(await call('getItem', key)) === value) return;
         } catch { /* перечитать не вышло — как «не нашли» */ }
       }
       throw new Error('Телеграм не ответил');
