@@ -701,7 +701,7 @@ form.addEventListener('submit', (event) => {
   // повторный ввод той же самой: она могла и не сохраниться, и сохраниться, а
   // вторая такая же исказила бы среднюю.
   if (store !== null && operations.slice(confirmedCount).some((op) => JSON.stringify(op) === JSON.stringify(read.operation))) {
-    text('record-error', 'Такая же запись уже внесена и ещё не сохранилась. Вносить её заново не нужно, иначе она задвоится: дождитесь «Сохранено» или нажмите «Сохранить ещё раз».');
+    text('record-error', 'Такая же запись уже внесена и ещё не сохранилась. Вносить её заново не нужно, иначе она задвоится: дождитесь «Сохранено»; если сохранение не удастся, появится кнопка «Сохранить ещё раз».');
     return;
   }
 
@@ -749,6 +749,10 @@ document.getElementById('undo').addEventListener('click', () => {
   if (index === -1) return;
   const { operation } = last;
   operations.splice(index, 1);
+  // Отменённая запись могла входить в подтверждённые; без этого внесённая вместо
+  // неё исправленная записалась бы в «подтверждённые» и защита от повторного
+  // ввода её не увидела бы.
+  confirmedCount = Math.min(confirmedCount, operations.length);
   // Монета без цены, у которой не осталось записей, из списка уходит.
   // Выбранной она тоже перестаёт быть — и здесь, и в запомненных вкладках.
   for (const coin of coins.filter((known) => known.id === null && !operations.some((op) => coinOf(op) === known))) {

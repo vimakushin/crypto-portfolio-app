@@ -261,7 +261,7 @@ test('изменена часть (та же длина) — сумма не с�
 test('главная запись повреждена или чужой формат — «не целы»', async () => {
   for (const [value, pattern] of [['{не json', /повреждена/], ['{"v":1}', /повреждена/], ['[]', /повреждена/],
     [(gen) => JSON.stringify({ v: 2, gen, chunks: 1, ops: 0, sha: 'a'.repeat(64) }), /более новой версией/],
-    [JSON.stringify({ v: 1, gen: 'другое', chunks: 1, ops: 0, sha: 'a'.repeat(64) }), /повреждена/]]) {
+    [JSON.stringify({ v: 1, gen: 'abc', chunks: 1, ops: 0, sha: 'a'.repeat(64) }), /повреждена/]]) {
     const cloud = await savedCloud();
     cloud.data.set(manifestKey(cloud), typeof value === 'function' ? value(manifestKey(cloud).slice(2)) : value);
     const result = await loadFrom(cloud);
@@ -551,7 +551,7 @@ test('две вкладки пишут одновременно: сохранё�
   }
 });
 
-test('когда ключей стало слишком много, чистка убирает и остатки оборвавшихся записей', async () => {
+test('остатки оборвавшихся записей убираются следующим сохранением', async () => {
   const cloud = fakeCloud();
   const backend = telegramBackend(cloud);
   for (let i = 0; i < 710; i++) await backend.set(`corphan_${i}`, 'x');
@@ -702,7 +702,7 @@ test('облако само ответило отказом: не повторя
   assert.equal(cloud.setCalls, 1);
 });
 
-// --- Уборка по возрасту ---
+// --- Неудавшееся удаление ---
 
 // Облако, у которого первые n удалений молчат с ошибкой: части прошлого состояния остаются.
 function cloudFailingRemoves(n) {
@@ -913,3 +913,48 @@ test('главная запись не читается и не пишется, 
   assert.equal(loaded.status, 'ok', loaded.reason);
   assert.equal(loaded.state.operations.length, history().length);
 });
+
+test('часть пропала, пока читали, потому что другое устройство сохранилось: читаем заново и получаем целое', async () => {
+  const cloud = fakeCloud();
+  await createStore(telegramBackend(cloud)).save({ operations: history().slice(0, 3), names: {} });
+  const inner = cloud.getItem;
+  let swapped = false;
+  cloud.getItem = (key, callback) => {
+    if (!swapped && key.startsWith('c')) {
+      swapped = true;
+      // Пока мы читаем старое состояние, другое устройство записало новое и убрало старое.
+      createStore(telegramBackend(cloud)).save({ operations: history(), names: {} }).then(() => inner(key, callback));
+      return;
+    }
+    inner(key, callback);
+  };
+  const loaded = await createStore(telegramBackend(cloud)).load();
+  assert.equal(loaded.status, 'ok', loaded.reason);
+  assert.equal(loaded.state.operations.length, history().length);
+});
+
+test('часть пропала и при повторном чтении — данные не целы, без пометки «прочитать заново»', async () => {
+  const cloud = await savedCloud();
+  cloud.data.delete(chunkKeys(cloud)[0]);
+  const result = await loadFrom(cloud);
+  assert.equal(result.status, 'broken');
+  assert.equal(result.retry, undefined);
+  assert.equal('missing' in result, false);
+});
+
+test('лежат и старый ключ m, и новый m_*: читается новый, первое сохранение убирает старый', async () => {
+  const cloud = await savedCloud(history().slice(0, 3));
+  cloud.data.set('m', JSON.stringify({ v: 1, gen: 'abc123def456', chunks: 1, ops: 1, sha: 'a'.repeat(64) }));
+  cloud.data.set('cabc123def456_0', 'остаток');
+  const store = createStore(telegramBackend(cloud));
+  assert.equal((await store.load()).state.operations.length, 3);
+  await store.save({ operations: history(), names: {} });
+  assert.ok(!cloud.data.has('m') && !cloud.data.has('cabc123def456_0'));
+});
+
+test('ключ m_… без времени в имени не считается самой новой главной записью', async () => {
+  const cloud = await savedCloud(history().slice(0, 3));
+  cloud.data.set('m_zzz', JSON.stringify({ v: 1, gen: 'zzz', chunks: 1, ops: 1, sha: 'a'.repeat(64) }));
+  assert.equal((await loadFrom(cloud)).state.operations.length, 3);
+});
+

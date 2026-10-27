@@ -33,7 +33,7 @@ import { checkHistory } from './calc.js';
 export const CHUNK_BYTES = 4096;
 
 // Ключей не больше 1024, а на время записи рядом лежат две версии данных
-// (старая и новая) и главная запись: 2·500 + 1 = 1001.
+// (старая и новая) и две главные записи: 2·500 + 2 = 1002.
 export const MAX_CHUNKS = 500;
 
 // Главная запись лежит под ключом m_<поколение>. Просто «m» — так её клали
@@ -187,6 +187,17 @@ async function save(backend, text, operations) {
 // У «не целы» из-за того, что хранилище не ответило, есть ещё retry: true —
 // данные могут быть в порядке, нужно прочитать заново, а не стирать.
 async function load(backend) {
+  // Часть пропала, пока мы читали: другое устройство могло сохраниться и убрать
+  // старое. Один раз читаем с самого начала; пропала и во второй раз — данные
+  // действительно не целы.
+  const result = await readOnce(backend);
+  if (!result.missing) return result;
+  const again = await readOnce(backend);
+  delete again.missing;
+  return again;
+}
+
+async function readOnce(backend) {
   try {
     const keys = await backend.keys();
     const manifestKey = newestManifestKey(keys) ?? (keys.includes(LEGACY_MANIFEST) ? LEGACY_MANIFEST : null);
@@ -219,7 +230,7 @@ async function load(backend) {
     const pieces = [];
     for (let index = 0; index < manifest.chunks; index++) {
       const piece = present(await backend.get(chunkKey(manifest.gen, index)));
-      if (piece === null) return { status: 'broken', reason: `не найдена часть ${index + 1} из ${manifest.chunks}` };
+      if (piece === null) return { status: 'broken', missing: true, reason: `не найдена часть ${index + 1} из ${manifest.chunks}` };
       pieces.push(piece);
     }
     const text = pieces.join('');
