@@ -137,6 +137,10 @@ function signs() {
 }
 
 const median = (numbers) => [...numbers].sort((a, b) => a - b)[Math.floor(numbers.length / 2)];
+// Удаление порциями: за один вызов сотни ключей удалять не пробовали.
+async function removeAll(cloud, keys) {
+  for (let from = 0; from < keys.length; from += 50) await rawCall(cloud, 'removeItems', keys.slice(from, from + 50));
+}
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Если слой хранения споткнулся — подбираем, на чём именно: куски настоящего
@@ -168,7 +172,7 @@ async function diagnose(cloud, text) {
 
 // Номер сборки страницы: Телеграм на телефоне может показать старую копию из кэша,
 // и по этой строке в присланном тексте видно, какая версия на самом деле работала.
-const BUILD = 'повторы-7';
+const BUILD = 'повторы-8';
 
 // Один и тот же кусок слоя пишется много раз подряд под разными ключами, и отдельно
 // — короткие значения с обратными косыми. Если зависания случайны, они будут и у
@@ -203,17 +207,18 @@ async function pacing(cloud, chunk, total = 300, gap = 0, label = '') {
     group.writes++;
     const started = performance.now();
     const since = () => Math.round(performance.now() - started);
-    let answered = false;
-    const writing = rawCall(cloud, 'setItem', key, chunk).then((call) => { answered = true; return call; });
+    let quick = false;
+    const writing = rawCall(cloud, 'setItem', key, chunk).then((call) => { quick = accepted(call) && call.ms <= 1000; return call; });
     // Появилось значение между чтением, начатым на lastMiss мс, и чтением, начатым на firstHit мс.
+    // Опрос идёт, пока запись не ответила быстро, но не дольше 60 с: до 8 с каждые 0,4 с, потом каждые 2 с.
     const watcher = watched ? (async () => {
       await pause(600);
       let lastMiss = null;
-      while (!answered) {
+      while (!quick && since() < 60000) {
         const readStarted = since();
         if (await present(key)) return { lastMiss, firstHit: readStarted };
         lastMiss = readStarted;
-        await pause(400);
+        await pause(readStarted < 8000 ? 400 : 2000);
       }
       return null;
     })() : null;
@@ -222,12 +227,12 @@ async function pacing(cloud, chunk, total = 300, gap = 0, label = '') {
     if (accepted(call) && call.ms <= 1000) continue;
     const hung = !accepted(call);
     if (hung) group.hung++; else group.slow++;
-    const found = watcher ? await watcher : null;
-    const polled = !watched ? 'опроса не было'
-      : found ? (found.lastMiss === null ? `при первом чтении (${found.firstHit} мс) значение уже лежало` : `значение появилось между ${found.lastMiss} и ${found.firstHit} мс`)
-      : 'до ответа значение не нашли';
-    // Поздние проверки не задерживают следующие записи.
+    // Опрос и поздние проверки идут в фоне и не задерживают следующие записи.
     pending.push((async () => {
+      const found = watcher ? await watcher : null;
+      const polled = !watched ? 'опроса не было'
+        : found ? (found.lastMiss === null ? `при первом чтении (${found.firstHit} мс) значение уже лежало` : `значение появилось между ${found.lastMiss} и ${found.firstHit} мс`)
+        : 'за 60 с опроса значение не появилось';
       const wait = (ms) => pause(Math.max(0, ms - (performance.now() - started)));
       await wait(10000);
       const at10 = await present(key);
@@ -273,10 +278,8 @@ async function repeats(cloud, text) {
     log(`        (№ — номер вызова за сеанс; мс или НЕТ): ${results.join(' ')}`);
   };
   await pacing(cloud, chunk);
-  // Если отказ — счётчик (каждая ~10-я запись), то и при редких записях он придёт на каждой ~10-й; если от темпа — не придёт.
-  await pacing(cloud, chunk, 30, 3000, 'slow');
   for (const count of [1, 10, 100, 500, 2048]) await outcomes(`обратных косых: ${count}`, '\\'.repeat(count), 3);
-  await rawCall(cloud, 'removeItems', [...Array.from({ length: 300 }, (_, index) => `${PREFIX}pace${index}`), ...Array.from({ length: 30 }, (_, index) => `${PREFIX}slowpace${index}`)]);
+  await removeAll(cloud, Array.from({ length: 300 }, (_, index) => `${PREFIX}pace${index}`));
 }
 
 // Пять частей слоя по очереди и пять разом, раунды вперемешку. Если облако
@@ -346,7 +349,7 @@ async function run() {
   const keysBefore = keysKnown ? before.result : [];
   // Остатки прошлого запуска этой страницы.
   const leftovers = keysBefore.filter((key) => key.startsWith(PREFIX));
-  if (leftovers.length > 0) await rawCall(cloud, 'removeItems', leftovers);
+  await removeAll(cloud, leftovers);
 
   // 1. Отсутствующий ключ.
   const missing = await rawCall(cloud, 'getItem', `${PREFIX}missing`);
@@ -423,7 +426,7 @@ async function run() {
   await parallelism(cloud, realText);
   // Что бы ни случилось, слой после себя убирает; на всякий случай — ещё раз.
   const strays = ((await rawCall(cloud, 'getKeys')).result ?? []).filter((key) => key.startsWith(PREFIX));
-  if (strays.length > 0) await rawCall(cloud, 'removeItems', strays);
+  await removeAll(cloud, strays);
 
   // 6. Скорость: сколько занимает сохранение, пока человек ждёт «Сохраняю…».
   const readTimes = [];
@@ -491,7 +494,7 @@ async function cleanUp() {
   if (!cloud) return;
   const keys = await rawCall(cloud, 'getKeys');
   const mine = Array.isArray(keys.result) ? keys.result.filter((key) => key.startsWith(PREFIX)) : [];
-  if (mine.length > 0) await rawCall(cloud, 'removeItems', mine);
+  await removeAll(cloud, mine);
 }
 
 try {
