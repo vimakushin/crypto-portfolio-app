@@ -671,6 +671,15 @@ function shortName(op) {
   return `перевод ${show(parseAmount(op.sent))} ${op.symbol}: ${op.from} → ${op.to}`;
 }
 
+// То же с датой, ценой и количеством — для списка несохранённого: после
+// «Перечитать» записи нет нигде, и внести её заново можно только по этому тексту.
+function fullName(op) {
+  const when = showDate(op.date);
+  if (op.type === 'buy') return `покупка ${show(quantityOf(op.money, op.price, op.received ?? ''))} ${op.symbol} за ${op.money} $ по ${op.price} $ в ${op.portfolio}, ${when}`;
+  if (op.type === 'sell') return `продажа ${show(parseAmount(op.quantity))} ${op.symbol} из ${op.portfolio} по ${op.price} $, ${when}`;
+  return `перевод ${show(parseAmount(op.sent))} ${op.symbol}: ${op.from} → ${op.to}, получено ${show(parseAmount(op.received))}, ${when}`;
+}
+
 form.addEventListener('submit', (event) => {
   event.preventDefault();
   // Недонабранную дату поле отдаёт пустой; молча подставить сегодняшнюю
@@ -950,7 +959,7 @@ let staleCloud = false;
 
 // Какие записи не сохранены, — чтобы человеку не пришлось вспоминать.
 function unsavedList() {
-  const names = operations.slice(confirmedCount).map(shortName);
+  const names = operations.slice(confirmedCount).map(fullName);
   return names.length === 0 ? '' : `: ${names.join('; ')}`;
 }
 
@@ -959,6 +968,9 @@ function showSaveState(kind, detail = '') {
   const failed = kind === 'failed' || kind === 'unavailable' || kind === 'stale';
   if (kind === 'saved') confirmedCount = operations.length;
   staleCloud = kind === 'stale';
+  // «Записано: …» с кнопкой отмены рядом с «Это не сохранено» говорило бы две
+  // противоположные вещи об одной записи; что не сохранено — перечислено ниже.
+  if (staleCloud) say('');
   byId('save-again').hidden = kind !== 'failed';
   byId('reread').hidden = kind !== 'stale';
   element.className = failed ? 'error' : 'hint';
@@ -966,7 +978,7 @@ function showSaveState(kind, detail = '') {
     saving: 'Сохраняю…',
     saved: `Сохранено ${where()}`,
     failed: `Не удалось сохранить: ${detail}. Запись не потеряна: она есть на этой странице, вносить её заново не нужно. Нажмите «Сохранить ещё раз» и не закрывайте страницу, пока не появится «Сохранено». Копию можно сохранить в файл ниже.`,
-    stale: `Данные изменились на другом устройстве, а здесь показано устаревшее состояние. Это не сохранено${unsavedList()}. Нажмите «Перечитать», чтобы увидеть актуальные данные, и внесите эти записи заново. Если нужна копия того, что здесь, сначала сохраните её в файл ниже.`,
+    stale: `Данные изменились на другом устройстве, а здесь показано устаревшее состояние. Это не сохранено${unsavedList()}. Нажмите «Перечитать», чтобы увидеть актуальные данные: страница загрузится заново, и всё несохранённое, а также недописанное в полях пропадёт, поэтому перепишите записи отсюда и внесите их заново. Если нужна копия того, что здесь, сначала сохраните её в файл ниже.`,
     unavailable: `${unavailableReason}: записи пропадут при закрытии страницы. Выгрузите их в файл ниже.`,
   }[kind];
 }
