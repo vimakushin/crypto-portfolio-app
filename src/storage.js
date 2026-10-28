@@ -153,7 +153,10 @@ async function save(backend, text, operations, held) {
   // Пока человек не перечитал, ничего не пишем: состояние у нас устарело (мы
   // помним прежнее поколение, и в облаке оно уже другое). Если мы ещё ничего не
   // читали и не писали (held.generation не задан), сравнивать не с чем.
-  if (held.generation !== undefined && standing(before) !== held.generation) throw staleError();
+  // Свою попытку с неизвестным исходом (см. ниже) за чужую не считаем: она могла
+  // лечь в облако, и тогда повтор человека должен пройти, а не отказать.
+  const now = standing(before);
+  if (held.generation !== undefined && now !== held.generation && !held.attempts.has(now)) throw staleError();
   // Если ключей накопилось столько, что новая запись упрётся в лимит, убирать
   // заменённое надо до неё, а не после. Убирается только то, что старше самой
   // новой главной записи; без неё (первое сохранение, прежние данные в старом
@@ -184,6 +187,8 @@ async function save(backend, text, operations, held) {
   const manifest = { v: FORMAT, gen: generation, chunks: pieces.length, ops: operations, sha: await checksum(text) };
   const manifestText = JSON.stringify(manifest);
   const manifestKey = MANIFEST_PREFIX + generation;
+  // Запоминаем до записи: ответ может не прийти, а запись всё равно лечь.
+  held.attempts.add(generation);
   await backend.set(manifestKey, manifestText);
 
   // Старое убирается только после того, как новая главная запись прочитана из
@@ -192,19 +197,23 @@ async function save(backend, text, operations, held) {
   // другой вкладки, если она новее нашей, остаётся вместе со своими частями.
   // Если за это время в облаке появилось более новое состояние, наше сохранение
   // проиграло: оно не объявляется удавшимся (устаревшее наше убирается).
+  // Не прочиталась обратно — не знаем, что в облаке (её могло убрать более новое
+  // сохранение другого устройства), поэтому «сохранено» не говорим; повтор
+  // человека пройдёт, потому что попытка запомнена в held.attempts.
   let newestNow = generation;
+  let confirmed = false;
   try {
-    if (present(await backend.get(manifestKey)) !== manifestText) {
-      held.generation = generation;
-      return;
+    confirmed = present(await backend.get(manifestKey)) === manifestText;
+    if (confirmed) {
+      const keys = await backend.keys();
+      const top = newestManifestKey(keys);
+      if (top !== null && generationOf(top) > generation) newestNow = generationOf(top);
+      await backend.remove(deadKeys(keys, newestNow));
     }
-    const keys = await backend.keys();
-    const top = newestManifestKey(keys);
-    if (top !== null && generationOf(top) > generation) newestNow = generationOf(top);
-    await backend.remove(deadKeys(keys, newestNow));
   } catch {
     // см. выше
   }
+  if (!confirmed) throw new Error('Телеграм не подтвердил запись: проверить её не удалось');
   if (newestNow !== generation) throw staleError();
   held.generation = generation;
 }
@@ -294,7 +303,7 @@ async function erase(backend, held) {
 export function createStore(backend) {
   let queue = Promise.resolve();
   // Какое поколение мы последним прочитали или записали (undefined — никакое).
-  const held = { generation: undefined };
+  const held = { generation: undefined, attempts: new Set() };
   // Сохранение, которое стоит в очереди и ещё не началось: новое состояние
   // заменяет его, и пишется одно последнее. Промежуточные записывать незачем,
   // а при медленном облаке они выстроились бы друг за другом.
