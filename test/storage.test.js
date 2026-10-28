@@ -440,7 +440,7 @@ test('список не списком — отказ', () => {
 
 // --- Файл выгрузки ---
 
-import { makeExport, readExport } from '../src/storage.js';
+import { makeExport, readExport, readPasted } from '../src/storage.js';
 
 test('выгрузка и загрузка файла возвращают то же состояние: операции, порядок, имена, средние', () => {
   const operations = [...history(), buy('2026-03-01', 'Binance', '70', '100'), sell('2026-03-01', 'Binance', '0.1', '100')];
@@ -1102,4 +1102,53 @@ test('данные первых версий прочитаны: первое с
   await store.load();
   await store.save({ operations: history(), names: {} });
   assert.equal((await store.load()).state.operations.length, history().length);
+});
+
+// --- Вставленный текст: ищем мягко, разбираем строго ---
+
+test('вставка: слова, кавычки и переносы вокруг выгрузки не мешают, разбирается то же самое', () => {
+  const text = makeExport({ operations: history(), names: { solana: 'Solana' } });
+  for (const [label, pasted] of [
+    ['пробелы и переносы по краям', `\n\n  ${text}  \n`],
+    // Неразрывный пробел и BOM прилипают при копировании из чата; JSON.parse их не терпит, разбирается кусок между скобками.
+    ['неразрывный пробел и BOM по краям', `\u00a0\ufeff${text}\u00a0`],
+    ['слова до и после', `Вот моя копия:\n${text}\nспасибо!`],
+    ['в кавычках', `"${text.trim()}"`],
+    ['в обратных кавычках', '```\n' + text + '```'],
+  ]) {
+    const result = readPasted(pasted);
+    assert.equal(result.ok, true, label);
+    assert.deepEqual(result.state.operations, history(), label);
+    assert.deepEqual(result.state.names, { solana: 'Solana' }, label);
+  }
+});
+
+test('вставка: терпимость в поиске, а не в разборе — всё, что отказывает файлу, отказывает и вставке', () => {
+  const good = JSON.parse(makeExport({ operations: history(), names: {} }));
+  const wrap = (data) => `Вот копия:\n${JSON.stringify(data, null, 1)}\nвсё`;
+  // Запись, на которой ломается история: названа так же точно, как у файла.
+  const broken = readPasted(wrap({ ...good, operations: [...good.operations, sell('2026-04-01', 'Кошелёк', '999', '100')] }));
+  assert.equal(broken.ok, false);
+  assert.match(broken.message, /запись №\d+ из \d+ \(2026-04-01, SOL\): .*нет столько монет/);
+  // Лишнее поле, чужая версия, чужое приложение, сломанное название монет.
+  assert.match(readPasted(wrap({ ...good, operations: [{ ...good.operations[0], лишнее: 1 }] })).message, /лишнее поле/);
+  assert.match(readPasted(wrap({ ...good, version: 2 })).message, /формат 2/);
+  assert.match(readPasted(wrap({ ...good, app: 'other' })).message, /не выгрузка этого приложения/);
+  assert.match(readPasted(wrap({ ...good, names: { solana: 5 } })).message, /названия монет/);
+  assert.match(readPasted('Привет {"a":1} пока').message, /не выгрузка этого приложения/);
+});
+
+test('вставка: без фигурных скобок и с мусором в них — отказ с причиной, как у файла', () => {
+  assert.match(readPasted('просто слова').message, /не читается как JSON/);
+  assert.match(readPasted('функция {x} и {y}').message, /не читается как JSON/);
+  assert.match(readPasted('   ').message, /не читается как JSON/);
+  assert.equal(readPasted('').ok, false);
+  assert.equal(readPasted('{').ok, false);
+  assert.equal(readPasted('}{').ok, false);
+});
+
+test('вставка: размер ограничен так же, как у файла', () => {
+  assert.match(readPasted(`слова ${'x'.repeat(5_100_000)}`).message, /больше 5 МБ/);
+  const huge = makeExport({ operations: [], names: { solana: 'x'.repeat(5_100_000) } });
+  assert.match(readPasted(huge).message, /больше 5 МБ/);
 });

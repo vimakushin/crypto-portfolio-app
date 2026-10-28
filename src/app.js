@@ -1,7 +1,7 @@
 import { calculate, checkHistory, coinKey, formatAmount, formatSignificant, isDate, parseAmount, SCALE } from './calc.js';
 import { history, overview } from './overview.js';
 import { fetchPrices, searchCoins } from './prices.js';
-import { createStore, makeExport, pickBackend, readExport } from './storage.js';
+import { createStore, makeExport, pickBackend, readExport, readPasted } from './storage.js';
 import { insideTelegram, loadTelegram, telegramReady } from './telegram.js';
 
 // Внесённые операции. Сохраняются после каждого изменения (см. «Хранение»
@@ -1163,9 +1163,9 @@ function showSaveState(kind, detail = '') {
   element.textContent = {
     saving: 'Сохраняю…',
     saved: `Сохранено ${where()}`,
-    failed: `Не удалось сохранить: ${detail}. Запись не потеряна: она есть на этой странице, вносить её заново не нужно. Нажмите «Сохранить ещё раз» и не закрывайте страницу, пока не появится «Сохранено». Копию можно сохранить в файл ниже.`,
-    stale: `Данные изменились на другом устройстве, а здесь показано устаревшее состояние. Это не сохранено${unsavedList()}. Нажмите «Перечитать», чтобы увидеть актуальные данные: страница загрузится заново, и всё несохранённое, а также недописанное в полях пропадёт, поэтому перепишите записи отсюда и внесите их заново. Если нужна копия того, что здесь, сначала сохраните её в файл ниже.`,
-    unavailable: `${unavailableReason}: записи пропадут при закрытии страницы. Выгрузите их в файл ниже.`,
+    failed: `Не удалось сохранить: ${detail}. Запись не потеряна: она есть на этой странице, вносить её заново не нужно. Нажмите «Сохранить ещё раз» и не закрывайте страницу, пока не появится «Сохранено». Копию можно сохранить ниже.`,
+    stale: `Данные изменились на другом устройстве, а здесь показано устаревшее состояние. Это не сохранено${unsavedList()}. Нажмите «Перечитать», чтобы увидеть актуальные данные: страница загрузится заново, и всё несохранённое, а также недописанное в полях пропадёт, поэтому перепишите записи отсюда и внесите их заново. Если нужна копия того, что здесь, сначала сохраните её копию ниже.`,
+    unavailable: `${unavailableReason}: записи пропадут при закрытии страницы. Выгрузите их копией ниже.`,
   }[kind];
 }
 
@@ -1179,10 +1179,11 @@ function refreshDataPanel() {
   // подхватывается и не сливается молча.
   byId('data-where').textContent = chosen === null ? ''
     : chosen.kind === 'telegram'
-      ? `Данные привязаны к вашему аккаунту Телеграма.${operations.length === 0 ? ' Здесь пока пусто: если вы вели записи в браузере, сохраните там копию в файл и загрузите её здесь.' : ''} Копия в файле нужна на случай, если что-то пойдёт не так.`
+      ? `Данные привязаны к вашему аккаунту Телеграма.${operations.length === 0 ? ' Здесь пока пусто. Если вы вели записи в браузере, сохраните там копию в файл, откройте файл, скопируйте всё его содержимое и вставьте в поле ниже.' : ''} Копия данных нужна на случай, если что-то пойдёт не так.`
       : 'Только на этом устройстве, в этом браузере. На другом их не будет, очистка браузера их сотрёт. Копия в файле — ваша страховка.';
   byId('export').disabled = operations.length === 0;
-  if (operations.length === 0 && !byId('data-note').textContent) byId('data-note').textContent = 'В файл пока нечего сохранять: записей нет.';
+  byId('copy').disabled = operations.length === 0;
+  if (operations.length === 0 && !byId('data-note').textContent) byId('data-note').textContent = insideTelegram(window) ? '' : 'В файл пока нечего сохранять: записей нет.';
 }
 
 // Сохранение не задерживает ввод: записи идут по очереди в фоне, а исход
@@ -1229,11 +1230,13 @@ function lockDown(reason, retry = false) {
   byId('reset-box').hidden = retry;
   byId('broken-text').hidden = retry;
   byId('data').hidden = retry;
+  placeTransfer();
   byId('storage-broken-title').textContent = retry ? 'Не удалось прочитать сохранённое:' : 'Сохранённые данные не целы:';
   refreshDataPanel();
   // Записей не ноль, а неизвестно сколько: «0 записей» здесь было бы неправдой.
   byId('data-info').textContent = 'Сохранённое не прочитано, выгружать нечего.';
   byId('export').disabled = true;
+  byId('copy').disabled = true;
 }
 
 function unlock() {
@@ -1241,6 +1244,7 @@ function unlock() {
   byId('storage-broken').hidden = true;
   byId('loading').hidden = true;
   byId('data').hidden = false;
+  placeTransfer();
   // Без записей показывать на главном экране нечего: сразу форма.
   showView(operations.length > 0 ? 'main' : 'entry');
 }
@@ -1307,18 +1311,79 @@ byId('export').addEventListener('click', () => {
   byId('data-note').textContent = `Копия: ${link.download} (${records(operations.length)}), в ${time}. Если файл не скачался, копии нет.`;
 });
 
-// Загрузка: файл целиком проверяется, показывается, что в нём, и только по
-// второму нажатию заменяет текущие данные.
+// Внутри Телеграма файл не скачивается: окно приложения просто открывает его
+// содержимое. Родное скачивание (downloadFile, Bot API 8.0+) требует HTTPS-ссылку
+// на файл на сервере и особые заголовки ответа, а своего сервера у проекта нет.
+// Поэтому там данные копируются текстом одним нажатием и принимаются обратно
+// вставкой. Чтение буфера у самого Телеграма (readTextFromClipboard) доступно
+// только приложениям, запущенным из меню вложений, и нам не годится: вставляет
+// человек сам, в поле. Вне Телеграма остаются файлы.
+function placeTransfer() {
+  const asText = insideTelegram(window);
+  for (const [id, hide] of [['export', asText], ['import-label', asText], ['copy', !asText], ['paste-box', !asText]]) byId(id).hidden = hide;
+}
+
+byId('copy').addEventListener('click', async () => {
+  const content = makeExport(snapshot());
+  const box = byId('copy-text');
+  box.value = content;
+  let copied = false;
+  try {
+    await navigator.clipboard.writeText(content);
+    copied = true;
+  } catch {
+    // Нет права на буфер: старый способ, он работает по нажатию, но поле для
+    // него должно быть видно и выделено.
+    box.hidden = false;
+    box.select();
+    try { copied = document.execCommand('copy'); } catch { /* скажем прямо ниже */ }
+  }
+  box.hidden = copied;
+  if (!copied) box.select();
+  const time = new Date().toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
+  byId('data-note').textContent = copied
+    ? `Данные (${records(operations.length)}) в буфере обмена, в ${time}. Это ещё не копия: откройте в Телеграме чат «Избранное» и вставьте их туда, пока не скопировали ничего другого.`
+    : 'Само не скопировалось. Нажмите в поле сразу под этой надписью, выделите всё и скопируйте. Это ещё не копия: откройте в Телеграме чат «Избранное» и вставьте скопированное туда.';
+});
+byId('copy-text').addEventListener('focus', (event) => event.target.select());
+
+// Загрузка: данные целиком проверяются, показывается, что в них, и только по
+// второму нажатию заменяют текущие. Файл и вставленный текст проходят через
+// одну и ту же проверку (readExport).
 let pendingImport = null;
 const importError = (message) => { byId('import-error').textContent = message; };
 
-byId('import-file').addEventListener('change', async (event) => {
-  const [file] = event.target.files;
-  event.target.value = '';
+function resetImport() {
   pendingImport = null;
   byId('import-confirm').hidden = true;
   form.inert = false;
   importError('');
+}
+
+function offerImport(content, source, read = readExport) {
+  const result = read(content);
+  if (!result.ok) return importError(`${source.name} не принят: ${result.message}. Ваши данные не тронуты.`);
+  pendingImport = result.state;
+  const dates = result.state.operations.map((op) => op.date).sort();
+  byId('import-summary').textContent = `В ${source.in} ${records(dates.length)}`
+    + (dates.length ? ` — с ${showDate(dates[0])} по ${showDate(dates.at(-1))}` : '')
+    + `. Ваши нынешние ${records(operations.length)} будут удалены и заменены ими — насовсем. Если сомневаетесь, сначала сохраните копию нынешних.`;
+  byId('import-confirm').hidden = false;
+  // Пока вопрос открыт, новая запись была бы затёрта заменой.
+  form.inert = true;
+}
+
+byId('paste-load').addEventListener('click', () => {
+  resetImport();
+  const content = byId('paste').value;
+  if (!content.trim()) return importError('Сначала вставьте в поле скопированные данные');
+  offerImport(content, { name: 'Текст', in: 'тексте' }, readPasted);
+});
+
+byId('import-file').addEventListener('change', async (event) => {
+  const [file] = event.target.files;
+  event.target.value = '';
+  resetImport();
   if (!file) return;
   let content;
   try {
@@ -1326,16 +1391,7 @@ byId('import-file').addEventListener('change', async (event) => {
   } catch {
     return importError('Файл не удалось прочитать');
   }
-  const result = readExport(content);
-  if (!result.ok) return importError(`Файл не принят: ${result.message}. Ваши данные не тронуты.`);
-  pendingImport = result.state;
-  const dates = result.state.operations.map((op) => op.date).sort();
-  byId('import-summary').textContent = `В файле ${records(dates.length)}`
-    + (dates.length ? ` — с ${showDate(dates[0])} по ${showDate(dates.at(-1))}` : '')
-    + `. Ваши нынешние ${records(operations.length)} будут удалены и заменены ими — насовсем. Если сомневаетесь, сначала сохраните копию нынешних.`;
-  byId('import-confirm').hidden = false;
-  // Пока вопрос открыт, новая запись была бы затёрта заменой.
-  form.inert = true;
+  offerImport(content, { name: 'Файл', in: 'файле' });
 });
 
 byId('import-cancel').addEventListener('click', () => {
@@ -1359,9 +1415,10 @@ byId('import-apply').addEventListener('click', async () => {
       form.inert = false;
     }
   }
-  pendingImport = null;
-  byId('import-confirm').hidden = true;
-  importError('');
+  resetImport();
+  byId('paste').value = '';
+  byId('paste').blur();
+  byId('copy-text').hidden = true;
   restore(state);
   unlock();
   resetView();

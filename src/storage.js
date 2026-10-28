@@ -445,15 +445,32 @@ export function makeExport(state, when = new Date()) {
 // message } — файл принимается целиком или не принимается: половина
 // операций дала бы неверные средние. Если в файле плохая операция, в
 // сообщении её номер и что с ней не так.
+// Вставленный текст. Человек копирует выгрузку из сообщения, и вокруг неё бывают
+// слова, кавычки, перенос строки. Терпимость нужна в поиске данных, строгость —
+// в их разборе: пробелы по краям убираются всегда, а если так не разобралось,
+// берётся кусок от первой «{» до последней «}». Разбирает его всё тот же
+// readExport, поэтому мусор, попавший в кусок, на нём же и отказывает, и
+// проверка не слабеет. Если кусок нашёлся, но не принят, называется его
+// причина: она точнее («запись №3…»), чем «не читается».
+export function readPasted(text) {
+  const trimmed = typeof text === 'string' ? text.trim() : text;
+  const whole = readExport(trimmed);
+  if (whole.ok || typeof trimmed !== 'string') return whole;
+  const start = trimmed.indexOf('{');
+  const end = trimmed.lastIndexOf('}');
+  if (start === -1 || end <= start || (start === 0 && end === trimmed.length - 1)) return whole;
+  return readExport(trimmed.slice(start, end + 1));
+}
+
 export function readExport(content) {
   if (typeof content !== 'string' || new TextEncoder().encode(content).length > FILE_LIMIT_BYTES) {
-    return { ok: false, message: `файл больше ${FILE_LIMIT_BYTES / 1_000_000} МБ` };
+    return { ok: false, message: `выгрузка больше ${FILE_LIMIT_BYTES / 1_000_000} МБ` };
   }
   let file;
   try {
     file = JSON.parse(content);
   } catch {
-    return { ok: false, message: 'это не выгрузка: файл не читается как JSON' };
+    return { ok: false, message: 'это не выгрузка: не читается как JSON' };
   }
   if (file === null || typeof file !== 'object' || file.app !== 'crypto-portfolio-app') {
     return { ok: false, message: 'это не выгрузка этого приложения' };

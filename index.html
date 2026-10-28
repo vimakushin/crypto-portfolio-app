@@ -20,7 +20,7 @@
       <p><strong id="storage-broken-title">Сохранённые данные не целы:</strong> <span id="storage-broken-reason"></span>.</p>
       <p id="broken-text">Приложение не может им доверять: ничего по ним не считает и новые записи не принимает, чтобы не затереть то, что осталось.</p>
       <p id="retry-box" hidden>Ничего не изменено, сохранённое могло остаться целым: просто не получилось до него достучаться. Закройте и откройте приложение заново или прочитайте ещё раз.<br><button type="button" class="chip" id="retry">Прочитать заново</button></p>
-      <p id="reset-box">Если у вас есть файл с копией данных, загрузите его (внизу). Или сотрите сохранённое и начните заново: <strong>стирание необратимо</strong>.<br><button type="button" class="chip" id="reset">Стереть сохранённое и начать заново</button></p>
+      <p id="reset-box">Если у вас есть копия данных (файл или скопированный текст), загрузите её (внизу). Или сотрите сохранённое и начните заново: <strong>стирание необратимо</strong>.<br><button type="button" class="chip" id="reset">Стереть сохранённое и начать заново</button></p>
     </div>
 
     <!-- Главный экран: итог, под ним разбивка по монетам. Портфели — переключатель,
@@ -178,10 +178,18 @@
       <p class="hint" id="data-where"></p>
       <div class="chips">
         <button type="button" class="chip" id="export">Сохранить копию в файл</button>
-        <label class="chip" for="import-file">Загрузить из файла</label>
+        <label class="chip" id="import-label" for="import-file">Загрузить из файла</label>
         <input type="file" id="import-file" accept="application/json,.json" hidden>
+        <!-- Внутри Телеграма вместо файла — текст: см. placeTransfer в app.js. -->
+        <button type="button" class="chip" id="copy" hidden>Скопировать данные</button>
       </div>
       <p class="hint" id="data-note" role="status"></p>
+      <textarea id="copy-text" class="transfer" readonly rows="6" aria-label="Данные для копирования" hidden></textarea>
+      <div id="paste-box" hidden>
+        <label for="paste">Вернуть данные: вставьте сюда текст, скопированный раньше</label>
+        <textarea id="paste" rows="3" autocomplete="off" spellcheck="false" placeholder="Вставьте сюда"></textarea>
+        <div class="chips"><button type="button" class="chip" id="paste-load">Проверить вставленное</button></div>
+      </div>
       <p class="error" id="import-error" role="alert"></p>
       <div class="notice" id="import-confirm" hidden>
         <p id="import-summary"></p>

@@ -53,7 +53,8 @@ label,
 }
 
 /* 16px и больше: меньший шрифт в поле заставляет iPhone приближать страницу. */
-input {
+input,
+textarea {
   width: 100%;
   padding: 12px;
   border: 1px solid var(--border);
@@ -64,7 +65,8 @@ input {
   font-size: 18px;
 }
 
-input:focus {
+input:focus,
+textarea:focus {
   outline: none;
   border-color: var(--brand);
 }
@@ -453,4 +455,20 @@ details[open] > summary::before {
 #portfolio-tabs .chip {
   flex: 0 1 auto;
   padding-inline: 14px;
+}
+
+/* Данные текстом (внутри Телеграма вместо файла): кусок, который копируют, —
+   мелким моноширинным шрифтом, чтобы поместилось больше. */
+textarea {
+  resize: vertical;
+}
+
+.transfer {
+  margin-top: 10px;
+  font-size: 12px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+}
+
+#paste-box {
+  margin-top: 12px;
 }
