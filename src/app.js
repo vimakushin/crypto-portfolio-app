@@ -1052,25 +1052,50 @@ function renderOverview() {
 
   // Почему цен нет, сказано у итога; здесь только когда они получены.
   const time = priceState.at?.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
-  text('price-note', priceState.status === 'ok' ? `Цены — CoinGecko, на ${time}` : '');
+  text('price-note', priceState.status === 'ok' ? `Цены на ${time}` : '');
   byId('prices-again').hidden = priceState.status !== 'failed';
 }
 
-// Два вида экрана: главный (итог и разбивка) и внесение. Блок «исход
-// сохранения» живёт в обоих: отказ или «устарело» нельзя оставлять там, где
+// Три экрана: главный (итог, разбивка, история), внесение и «Данные» (копия
+// и возврат; нужен раз в месяц, поэтому за неприметной ссылкой). Блок «исход
+// сохранения» живёт на всех: отказ или «устарело» нельзя оставлять там, где
 // его не увидят.
+let view = 'main';
+// Откуда открыли «Данные»: назад ведёт туда же.
+let cameFrom = 'main';
+
+// Шапка экрана внесения зависит от того, есть ли записи. Назад — только когда
+// есть куда: на первом запуске портфеля ещё нет, и «К портфелю» вело бы на
+// пустой экран; из «Данных» — просто назад. Пока записей нет, вместо «Новая
+// запись» стоит название приложения с одной строкой о том, что это и с чего
+// начать, и подсказка для нового устройства; с первой записью они уходят:
+// дальше человек знает, где он.
+function refreshHeader() {
+  const first = view === 'entry' && operations.length === 0;
+  byId('back').hidden = view === 'main' || first;
+  byId('back').textContent = view === 'data' ? '← Назад' : '← К портфелю';
+  byId('intro').hidden = !first;
+  byId('empty-hint').hidden = !first;
+  if (view === 'entry') byId('title').textContent = first ? 'Учёт криптовалют' : screenTitles.entry;
+}
+const screenTitles = { main: 'Портфель', entry: 'Новая запись', data: 'Данные' };
+
 function showView(name) {
-  const main = name === 'main';
-  byId('overview').hidden = !main;
-  byId('add-bar').hidden = !main;
-  byId('modes').hidden = main;
-  form.hidden = main;
-  byId('back').hidden = main;
-  byId('title').textContent = main ? 'Портфель' : 'Новая запись';
-  if (main) byId('main-save').append(byId('save-block'));
+  if (name === 'data' && view !== 'data') cameFrom = view;
+  view = name;
+  byId('overview').hidden = name !== 'main';
+  byId('add-bar').hidden = name !== 'main';
+  byId('open-data').hidden = name !== 'main';
+  byId('modes').hidden = name !== 'entry';
+  form.hidden = name !== 'entry';
+  byId('data').hidden = name !== 'data';
+  byId('title').textContent = screenTitles[name];
+  refreshHeader();
+  if (name === 'main') byId('main-save').append(byId('save-block'));
+  else if (name === 'data') byId('data-save').append(byId('save-block'));
   else byId('unbound').before(byId('save-block'));
   // loadPrices сразу перерисовывает экран, отдельный вызов не нужен.
-  if (main) loadPrices();
+  if (name === 'main') loadPrices();
 }
 
 // --- Хранение ---
@@ -1162,7 +1187,7 @@ function showSaveState(kind, detail = '') {
   element.className = failed ? 'error' : 'hint';
   element.textContent = {
     saving: 'Сохраняю…',
-    saved: `Сохранено ${where()}`,
+    saved: `Сохранено ${where()} · ${records(operations.length)}`,
     failed: `Не удалось сохранить: ${detail}. Запись не потеряна: она есть на этой странице, вносить её заново не нужно. Нажмите «Сохранить ещё раз» и не закрывайте страницу, пока не появится «Сохранено». Копию можно сохранить ниже.`,
     stale: `Данные изменились на другом устройстве, а здесь показано устаревшее состояние. Это не сохранено${unsavedList()}. Нажмите «Перечитать», чтобы увидеть актуальные данные: страница загрузится заново, и всё несохранённое, а также недописанное в полях пропадёт, поэтому перепишите записи отсюда и внесите их заново. Если нужна копия того, что здесь, сначала сохраните её копию ниже.`,
     unavailable: `${unavailableReason}: записи пропадут при закрытии страницы. Выгрузите их копией ниже.`,
@@ -1170,8 +1195,8 @@ function showSaveState(kind, detail = '') {
 }
 
 function refreshDataPanel() {
-  byId('data-info').textContent = store === null ? `Данные не сохраняются. Сейчас на странице ${records(operations.length)}.`
-    : `Хранятся ${where()}. Сейчас ${records(operations.length)}.`;
+  // «Где лежат и сколько» — в строке сохранения вверху; здесь только когда сохранять некуда.
+  byId('data-info').textContent = store === null ? `Данные не сохраняются. Сейчас на странице ${records(operations.length)}.` : '';
   // Что «сохранено» на деле значит: на другом устройстве этого нет, а очистка
   // браузера всё уберёт — единственная копия, которую человек держит сам, это файл.
   // Записи из обычного браузера в облако сами не переезжают: это разные
@@ -1179,8 +1204,9 @@ function refreshDataPanel() {
   // подхватывается и не сливается молча.
   byId('data-where').textContent = chosen === null ? ''
     : chosen.kind === 'telegram'
-      ? `Данные привязаны к вашему аккаунту Телеграма.${operations.length === 0 ? ' Здесь пока пусто. Если вы вели записи в браузере, сохраните там копию в файл, откройте файл, скопируйте всё его содержимое и вставьте в поле ниже.' : ''} Копия данных нужна на случай, если что-то пойдёт не так.`
+      ? `Данные привязаны к вашему аккаунту Телеграма.${operations.length === 0 ? ' Здесь пока пусто. Если вы вели записи в другом месте (например, в браузере), сохраните там копию в файл, откройте файл, скопируйте всё его содержимое и вставьте в поле ниже.' : ''} Копия данных нужна на случай, если что-то пойдёт не так.`
       : 'Только на этом устройстве, в этом браузере. На другом их не будет, очистка браузера их сотрёт. Копия в файле — ваша страховка.';
+  refreshHeader();
   byId('export').disabled = operations.length === 0;
   byId('copy').disabled = operations.length === 0;
   if (operations.length === 0 && !byId('data-note').textContent) byId('data-note').textContent = insideTelegram(window) ? '' : 'В файл пока нечего сохранять: записей нет.';
@@ -1243,7 +1269,6 @@ function unlock() {
   telegramReady(window);
   byId('storage-broken').hidden = true;
   byId('loading').hidden = true;
-  byId('data').hidden = false;
   placeTransfer();
   // Без записей показывать на главном экране нечего: сразу форма.
   showView(operations.length > 0 ? 'main' : 'entry');
@@ -1420,7 +1445,11 @@ byId('import-apply').addEventListener('click', async () => {
   byId('paste').blur();
   byId('copy-text').hidden = true;
   restore(state);
+  const wasLocked = !byId('storage-broken').hidden;
   unlock();
+  // Данные были не целы — теперь целы, и человек идёт к портфелю; иначе остаётся
+  // там, где нажимал, потому что подтверждение «Загружено» стоит на этом экране.
+  if (!wasLocked) showView('data');
   resetView();
   refreshDataPanel();
   if (store !== null) showSaveState('saved');
@@ -1442,7 +1471,8 @@ byId('add').addEventListener('click', () => {
   showView('entry');
   window.scrollTo(0, 0);
 });
-byId('back').addEventListener('click', () => { showView('main'); window.scrollTo(0, 0); });
+byId('back').addEventListener('click', () => { showView(view === 'data' ? cameFrom : 'main'); window.scrollTo(0, 0); });
+for (const id of ['open-data', 'restore-link']) byId(id).addEventListener('click', () => { showView('data'); window.scrollTo(0, 0); });
 byId('prices-again').addEventListener('click', loadPrices);
 
 byId('reset').addEventListener('click', async () => {

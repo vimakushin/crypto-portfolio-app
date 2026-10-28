@@ -11,7 +11,10 @@
 </head>
 <body>
   <main>
-    <h1 id="title">Портфель</h1>
+    <div class="head">
+      <h1 id="title">Портфель</h1>
+      <button type="button" class="link" id="open-data" hidden>Данные</button>
+    </div>
 
     <p class="hint" id="loading">Читаю сохранённое…</p>
 
@@ -54,6 +57,12 @@
 
     <!-- Поля трёх операций в одной форме: монета, цена и дата у них общие.
          data-modes — при каких операциях поле видно. -->
+    <!-- Первый запуск: одно предложение, что это, и одно действие. Уходит с первой записью. -->
+    <p class="intro" id="intro" hidden>Считает среднюю цену ваших покупок по каждой монете, бирже и кошельку. Начните с первой покупки ниже.</p>
+
+    <!-- Человек с новым телефоном попадает сюда: раньше подсказка о переносе данных стояла внизу страницы. -->
+    <p class="hint" id="empty-hint" hidden>Уже вели записи в другом месте? <button type="button" class="link" id="restore-link">Вернуть данные из копии</button></p>
+
     <div class="chips tabs" id="modes" role="group" aria-label="Вид операции" hidden>
       <button type="button" class="chip" data-mode="buy">Покупка</button>
       <button type="button" class="chip" data-mode="sell">Продажа</button>
@@ -172,8 +181,8 @@
       <div id="unbound"></div>
     </form>
 
-    <section class="data" id="data" aria-labelledby="data-title" hidden>
-      <h2 id="data-title">Данные</h2>
+    <section class="data" id="data" aria-label="Данные" hidden>
+      <div id="data-save"></div>
       <p class="hint" id="data-info"></p>
       <p class="hint" id="data-where"></p>
       <div class="chips">
