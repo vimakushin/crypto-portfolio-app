@@ -1,4 +1,5 @@
 import { calculate, checkHistory, coinKey, formatAmount, formatSignificant, isDate, parseAmount, SCALE } from './calc.js';
+import { history, overview } from './overview.js';
 import { fetchPrices, searchCoins } from './prices.js';
 import { createStore, makeExport, pickBackend, readExport } from './storage.js';
 import { insideTelegram, loadTelegram, telegramReady } from './telegram.js';
@@ -256,9 +257,19 @@ function sanitize() {
 
 // --- Монета ---
 
+// Другая монета — другая цена: ни подставленная, ни вписанная руками на неё
+// не переезжает. Иначе чужая цена попала бы в учёт под видом цены этой монеты,
+// а поле, занятое чужим числом, ещё и не дало бы подставить настоящую.
+function dropPrice() {
+  input.price.value = '';
+  priceAuto = false;
+  input.price.classList.remove('mirrored');
+}
+
 // Покупка: монета из поиска или из недавних.
 function selectCoin(coin) {
   clearTimeout(searchTimer);
+  if (selectedCoin !== null && !sameCoin(selectedCoin, coin)) dropPrice();
   selectedCoin = coin;
   foundCoins = [];
   input.coin.value = coin.symbol;
@@ -270,6 +281,7 @@ function selectCoin(coin) {
 
 // Продажа и перевод: монета из тех, что лежат.
 function selectHeld(coin) {
+  if (selectedCoin !== null && !sameCoin(selectedCoin, coin)) dropPrice();
   selectedCoin = coin;
   clearPresets();
   setError('coin', '');
@@ -671,14 +683,22 @@ function shortName(op) {
   return `перевод ${show(parseAmount(op.sent))} ${op.symbol}: ${op.from} → ${op.to}`;
 }
 
-// То же с датой, ценой и количеством — для списка несохранённого: после
-// «Перечитать» записи нет нигде, и внести её заново можно только по этому тексту.
-function fullName(op) {
-  const when = showDate(op.date);
-  if (op.type === 'buy') return `покупка ${show(quantityOf(op.money, op.price, op.received ?? ''))} ${op.symbol} за ${op.money} $ по ${op.price} $ в ${op.portfolio}, ${when}`;
-  if (op.type === 'sell') return `продажа ${show(parseAmount(op.quantity))} ${op.symbol} из ${op.portfolio} по ${op.price} $, ${when}`;
-  return `перевод ${show(parseAmount(op.sent))} ${op.symbol}: ${op.from} → ${op.to}, получено ${show(parseAmount(op.received))}, ${when}`;
+// Запись целиком, без даты: что куплено, сколько, за сколько, где. Продажу
+// из файла могли внести деньгами, а не количеством (см. checkOperation).
+function opText(op) {
+  if (op.type === 'buy') {
+    return `покупка ${show(quantityOf(op.money, op.price, op.received ?? ''))} ${op.symbol} за ${op.money} $ по ${op.price} $ в ${op.portfolio}`;
+  }
+  if (op.type === 'sell') {
+    const what = op.quantity !== undefined ? show(parseAmount(op.quantity)) : `на ${op.money} $`;
+    return `продажа ${what} ${op.symbol} из ${op.portfolio} по ${op.price} $`;
+  }
+  return `перевод ${show(parseAmount(op.sent))} ${op.symbol}: ${op.from} → ${op.to}, получено ${show(parseAmount(op.received))}`;
 }
+
+// То же с датой — для списка несохранённого: после «Перечитать» записи нет
+// нигде, и внести её заново можно только по этому тексту.
+const fullName = (op) => `${opText(op)}, ${showDate(op.date)}`;
 
 form.addEventListener('submit', (event) => {
   event.preventDefault();
@@ -780,9 +800,8 @@ document.getElementById('undo').addEventListener('click', () => {
   for (const name of portfolios.filter((known) => !used.has(known))) portfolios.splice(portfolios.indexOf(name), 1);
   const previousCoin = selectedCoin;
   sanitize();
-  if (selectedCoin !== previousCoin && priceAuto) {
-    input.price.value = '';
-    priceAuto = false;
+  if (selectedCoin !== previousCoin) {
+    dropPrice();
     text('price-source', '');
   }
   render();
@@ -848,6 +867,7 @@ for (const name of ['coin', 'money', 'price', 'received', 'portfolio', 'date', '
   });
 }
 input.coin.addEventListener('input', () => {
+  const hadCoin = selectedCoin !== null;
   selectedCoin = null;
   // Результаты прежнего текста — неправда про новый, а кнопка «нет в списке»
   // при них позволила бы записать без цены монету, которая в справочнике есть.
@@ -855,12 +875,9 @@ input.coin.addEventListener('input', () => {
   searchFailed = false;
   searchEmpty = false;
   searchBusy = false;
-  // Подставленная цена была ценой прежней монеты — с новой ей не место.
-  // Подпись под ценой тоже про прежнюю монету, даже если цена ещё не пришла.
-  if (priceAuto) {
-    input.price.value = '';
-    priceAuto = false;
-  }
+  // Цена была ценой прежней монеты — с новой ей не место. Подпись под ценой
+  // тоже про прежнюю монету, даже если цена ещё не пришла.
+  if (hadCoin) dropPrice();
   text('price-source', '');
   searchLater();
   renderCoins();
@@ -886,6 +903,175 @@ input.moved.addEventListener('input', () => {
 });
 input.date.addEventListener('input', () => { if (selectedCoin !== null) fillPrice(); });
 window.addEventListener('online', offerBinding);
+
+// --- Главный экран ---
+//
+// Сверху итог, под ним разбивка по монетам; портфели — переключатель. Числа
+// считает overview.js, здесь только показ. Что бы ни случилось с ценами,
+// количество, вложенное и средние показываются: от курса зависит одна
+// стоимость, и если её нет, об этом сказано прямо, а не подставлен ноль.
+
+// Выбранный портфель; null — все вместе.
+let viewPortfolio = null;
+// Цены идут отдельно от записей: без сети всё остальное считается.
+let priceState = { status: 'idle', prices: null, at: null, reason: '' };
+let priceRun = 0;
+
+const el = (tag, className, content = '') => {
+  const node = document.createElement(tag);
+  node.className = className;
+  node.textContent = content;
+  return node;
+};
+
+// Доллары: два знака, тысячи через неразрывный пробел; малое — значащими
+// цифрами, чтобы 0.004 $ не превратилось в «0».
+const grouped = (whole) => whole.replace(/\B(?=(\d{3})+(?!\d))/g, '\u00a0');
+function dollars(units) {
+  let digits = formatAmount(units, 2);
+  if (units > 0n && digits === '0') digits = formatSignificant(units, 2);
+  const [whole, fraction] = digits.split('.');
+  return grouped(whole) + (fraction ? `.${fraction.padEnd(2, '0')}` : '');
+}
+// Средняя цена: значащие цифры, как везде, но тысячи разделены, как у сумм рядом.
+const averageText = (units) => {
+  const [whole, fraction] = showPrice(units).split('.');
+  return grouped(whole) + (fraction ? `.${fraction}` : '');
+};
+const signed = (units) => (units === 0n ? '0 $' : `${units > 0n ? '+' : '−'}${dollars(units < 0n ? -units : units)} $`);
+function signedPercent(units) {
+  const size = units < 0n ? -units : units;
+  let digits = formatAmount(size, 1);
+  if (size > 0n && digits === '0') digits = formatSignificant(size, 2);
+  return `${units > 0n ? '+' : units < 0n ? '−' : ''}${digits}%`;
+}
+const tone = (units) => (units > 0n ? 'gain' : units < 0n ? 'loss' : '');
+
+async function loadPrices() {
+  const run = ++priceRun;
+  const ids = overview(operations, null).rows.map((row) => row.key).filter((key) => !key.startsWith('?'));
+  if (ids.length === 0) {
+    priceState = { status: 'idle', prices: null, at: null, reason: '' };
+    return renderOverview();
+  }
+  priceState = { status: 'loading', prices: null, at: null, reason: '' };
+  renderOverview();
+  try {
+    const prices = await fetchPrices(ids);
+    if (run === priceRun) priceState = { status: 'ok', prices, at: new Date(), reason: '' };
+  } catch (error) {
+    if (run === priceRun) priceState = { status: 'failed', prices: null, at: null, reason: error.busy ? 'CoinGecko просит подождать минуту' : 'нет связи с CoinGecko' };
+  }
+  if (run === priceRun) renderOverview();
+}
+
+// Почему у монеты нет стоимости — одной фразой.
+function noValueReason(row) {
+  if (row.why === 'unbound') return 'нет: монета не привязана к CoinGecko (привязка — при внесении)';
+  if (priceState.status !== 'ok') return '—';
+  return 'нет: CoinGecko не прислал цену';
+}
+
+function rowItem(row) {
+  const head = el('div', 'row-head');
+  head.append(el('strong', '', row.symbol), el('span', 'qty', show(row.quantity)));
+  head.append(row.value === null
+    ? el('span', 'row-diff qty', row.why === 'unbound' ? 'без цены' : 'нет цены')
+    : el('span', `row-diff ${tone(row.difference)}`, `${signed(row.difference)} (${signedPercent(row.percent)})`));
+  const detail = el('div', 'row-detail', `${viewPortfolio === null ? 'средняя по всем' : `средняя в ${viewPortfolio}`} ${averageText(row.average)} $ · вложено ${dollars(row.cost)} $ · сейчас ${row.value === null ? noValueReason(row) : `${dollars(row.value)} $`}`);
+  const item = el('li', 'row');
+  item.append(head, detail);
+  return item;
+}
+
+function openHistoryAt(operation) {
+  byId('history').open = true;
+  const index = operations.indexOf(operation);
+  byId('history-list').querySelector(`[data-index="${index}"]`)?.scrollIntoView({ block: 'center' });
+}
+
+function renderTabs() {
+  const tabs = byId('portfolio-tabs');
+  if (viewPortfolio !== null && !portfolios.includes(viewPortfolio)) viewPortfolio = null;
+  tabs.hidden = portfolios.length < 2;
+  const choose = (name) => () => { viewPortfolio = name; renderOverview(); };
+  tabs.replaceChildren(chip('Все', viewPortfolio === null, choose(null)), ...portfolios.map((name) => chip(name, viewPortfolio === name, choose(name))));
+}
+
+function renderOverview() {
+  if (byId('overview').hidden) return;
+  renderTabs();
+  const { rows, totals, excluded, failed } = overview(operations, priceState.prices, viewPortfolio);
+
+  byId('sum-cost').textContent = totals.cost === null ? '—' : `${dollars(totals.cost)} $`;
+  byId('sum-value').textContent = totals.value === null ? '—' : `${dollars(totals.value)} $`;
+  const difference = byId('sum-difference');
+  difference.className = `difference ${totals.difference === null ? '' : tone(totals.difference)}`;
+  // Без позиций разницы нет: «0 $» рядом с «Сейчас ничего нет» только запутал бы.
+  difference.replaceChildren(...(totals.difference === null || rows.length === 0 ? [] : [
+    el('small', '', 'Разница '),
+    document.createTextNode(`${signed(totals.difference)} `),
+    ...(totals.percent === null ? [] : [el('small', '', `${signedPercent(totals.percent)} к вложенному`)]),
+  ]));
+
+  // Чего в итоге нет — сразу под числами, а не сноской внизу: частичный итог
+  // без названия исключённого был бы ложью, названный — нет.
+  const reasons = { 'no-price': 'нет цены', unbound: 'не привязана к CoinGecko', failed: 'не удалось посчитать' };
+  text('sum-exclusion', excluded.length === 0 ? ''
+    : `Итог без: ${excluded.map((e) => `${e.symbol}${e.cost === null ? '' : ` (вложено ${dollars(e.cost)} $)`} — ${reasons[e.why]}`).join('; ')}.`);
+  // Стоимости нет вовсе, ни у одной монеты — причина одна на всех.
+  text('sum-note', rows.length === 0 || totals.value !== null ? ''
+    : priceState.status === 'loading' ? 'Цены загружаются…'
+    : priceState.status === 'failed' ? `Текущей стоимости нет: ${priceState.reason}. Количество, вложенное и средние посчитаны.`
+    : 'Стоимости нет ни у одной монеты: у каждой ниже написана причина.');
+
+  byId('rows').replaceChildren(...rows.map(rowItem));
+  byId('rows-empty').hidden = rows.length > 0 || failed.length > 0;
+
+  byId('failed').replaceChildren(...failed.map((f) => {
+    const box = el('div', 'notice alert');
+    const message = el('p', '');
+    message.append(el('strong', '', `${f.symbol} не посчитана: `), document.createTextNode(`${f.message}. В итог она не входит.`));
+    const find = el('button', 'chip', 'Найти запись в истории');
+    find.type = 'button';
+    find.addEventListener('click', () => openHistoryAt(f.operation));
+    box.append(message, find);
+    return box;
+  }));
+
+  const bad = new Map(failed.map((f) => [f.operation, f.message]));
+  const entries = history(operations, viewPortfolio);
+  byId('history-title').textContent = `История операций (${entries.length})`;
+  byId('history-list').replaceChildren(...entries.map(({ op, index }) => {
+    const item = el('li', bad.has(op) ? 'op bad' : 'op');
+    item.dataset.index = String(index);
+    item.append(el('time', '', showDate(op.date)), el('span', '', opText(op)));
+    if (bad.has(op)) item.append(el('p', 'why', `На этой записи расчёт остановился: ${bad.get(op)}`));
+    return item;
+  }));
+
+  // Почему цен нет, сказано у итога; здесь только когда они получены.
+  const time = priceState.at?.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' });
+  text('price-note', priceState.status === 'ok' ? `Цены — CoinGecko, на ${time}` : '');
+  byId('prices-again').hidden = priceState.status !== 'failed';
+}
+
+// Два вида экрана: главный (итог и разбивка) и внесение. Блок «исход
+// сохранения» живёт в обоих: отказ или «устарело» нельзя оставлять там, где
+// его не увидят.
+function showView(name) {
+  const main = name === 'main';
+  byId('overview').hidden = !main;
+  byId('add-bar').hidden = !main;
+  byId('modes').hidden = main;
+  form.hidden = main;
+  byId('back').hidden = main;
+  byId('title').textContent = main ? 'Портфель' : 'Новая запись';
+  if (main) byId('main-save').append(byId('save-block'));
+  else byId('unbound').before(byId('save-block'));
+  // loadPrices сразу перерисовывает экран, отдельный вызов не нужен.
+  if (main) loadPrices();
+}
 
 // --- Хранение ---
 //
@@ -1053,11 +1239,10 @@ function lockDown(reason, retry = false) {
 function unlock() {
   telegramReady(window);
   byId('storage-broken').hidden = true;
-  byId('title').textContent = 'Новая запись';
   byId('loading').hidden = true;
   byId('data').hidden = false;
-  byId('modes').hidden = false;
-  form.hidden = false;
+  // Без записей показывать на главном экране нечего: сразу форма.
+  showView(operations.length > 0 ? 'main' : 'entry');
 }
 
 // Внутри Телеграма подключаем его скрипт и берём облако; снаружи — localStorage.
@@ -1192,6 +1377,16 @@ byId('import-apply').addEventListener('click', async () => {
 let resetArmed = false;
 byId('retry').addEventListener('click', () => location.reload());
 byId('reread').addEventListener('click', () => location.reload());
+
+// Форма открывается на покупке, а не там, где её оставили: после продажи
+// каждое следующее внесение начиналось бы не с того.
+byId('add').addEventListener('click', () => {
+  if (mode !== 'buy') setMode('buy');
+  showView('entry');
+  window.scrollTo(0, 0);
+});
+byId('back').addEventListener('click', () => { showView('main'); window.scrollTo(0, 0); });
+byId('prices-again').addEventListener('click', loadPrices);
 
 byId('reset').addEventListener('click', async () => {
   const button = byId('reset');

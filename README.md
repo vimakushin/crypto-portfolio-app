@@ -52,14 +52,16 @@ What works today, in a browser:
 - saving every change in the browser (local storage) and reading it back on reload, with the same averages;
 - exporting everything to a file and loading it back; a file with one bad entry is rejected whole, and the message names the entry;
 - the current price filled in from CoinGecko; the date, the last used portfolio and the coin quantity are also filled in or calculated;
-- the average entry price per portfolio and per coin, recalculated from the full history of entries. For now it is visible only in the confirmation after a sale (both levels) and after a transfer (the coin's overall average); a purchase confirmation does not show it yet;
+- the average entry price per portfolio and per coin, recalculated from the full history of entries;
+- a main screen: the amount invested in what is held now, what it is worth, and the difference, with a breakdown by coin underneath (quantity, average entry price, invested, current value, difference) and a switch between portfolios, shown once there are two or more. Money from sales is not counted in "invested" and the result of a sale is not shown;
+- on the main screen, when something cannot be calculated the screen says so instead of showing a number. The totals cover the coins that could be valued, and what is left out is named right under the numbers, with the amount invested in it ("Total without: SOL (invested $50) — no price"), so a partial total is never presented as a full one. A coin the calculation could not process is listed with the reason and the entry it stopped on. A coin without a price shows why. If no coin has a price, no value or difference is shown. If prices cannot be fetched, quantities, amounts invested and average prices are still shown, and the screen says the current value is missing. A collapsible history of entries, newest first, follows the selected portfolio;
 - working without a connection: everything except current prices and coin search. A coin entered offline is stored unlinked until it can be matched.
 
 Not done yet:
 
 - saving to Telegram's cloud storage has been measured on one iPhone (iOS 18, Telegram Bot API 9.6) but not tested end to end with the current code. Measured there: an absent key reads as an empty string; a write is confirmed with `true`; values up to 4096 bytes are accepted, and the limit counts bytes, not characters; a write over the limit gets no reply at all; the cloud held no keys other than ours. The whole storage layer passed in two runs. Other platforms have not been checked;
 - about one write in ten gets a late reply or none (39 of 400 repeated writes in those two runs: 14 answered after 3.3 to 7.3 seconds, 25 not within 8 seconds; no read failed). A write without a reply has not necessarily failed: of those 25, 14 were stored when the key was read back ten seconds later, and 11 were not (none of 8 in one run, 11 of 17 in the other). Why the two runs differ, and why the failures come at regular intervals, is not known. The app does not depend on the answer (see "A silent cloud is not an answer" above), and that protection has been tested against a fake that drops writes and withholds replies, not against the live cloud;
-- there is no main screen with positions and averages;
+- the main screen was checked by hand in headless Edge at 390 px wide, against a stand-in for CoinGecko: prices received, no connection, a rate-limit reply, a coin without a price, an unlinked coin, a tiny remainder, everything sold, an empty portfolio and a coin the calculation could not process. The arithmetic behind it is covered by tests; the page itself is not, so a regression in it would not be caught automatically;
 - entries cannot be edited, only the last one undone;
 - the interface is in Russian only;
 - how long it takes to enter a purchase on a phone has not been measured.
@@ -80,7 +82,7 @@ Then open http://localhost:8765.
 npm test
 ```
 
-This runs Node's built-in test runner (tested with Node.js 22). The tests cover the calculation, the price module, the storage layer (against a fake that enforces Telegram's limits) and file import; the network is not used. The page itself is not covered by automated tests.
+This runs Node's built-in test runner (tested with Node.js 22). The tests cover the calculation, the numbers behind the main screen, the price module, the storage layer (against a fake that enforces Telegram's limits) and file import; the network is not used. The page itself is not covered by automated tests.
 
 Prices: [CoinGecko](https://www.coingecko.com).
 

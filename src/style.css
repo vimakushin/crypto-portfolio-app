@@ -1,6 +1,9 @@
 /* Тёмная тема с зелёным. Фирменный зелёный — только оформление (кнопка,
-   выбранное): прибыль и убыток позже получат свои оттенки, отличимые от него,
-   чтобы зелёный не читался как «всё хорошо». */
+   выбранное). Три смысла не должны сливаться: оформление — зелёный, ошибка —
+   оранжевый, прибыль и убыток — синий и малиновый. Различие по CIE Lab:
+   убыток от ошибки 48, убыток от зелёного 117, прибыль от зелёного 80,
+   прибыль от убытка 77 (заметной считается разница около 2–5). Знак «+»/«−»
+   стоит у каждой разницы, так что цвет не единственный носитель смысла. */
 :root {
   --bg: #0e1411;
   --surface: #17201b;
@@ -10,6 +13,8 @@
   --brand: #3fcf8e;
   --brand-text: #06210f;
   --error: #ff9b7a;
+  --gain: #5db8ff;
+  --loss: #ff6fae;
   color-scheme: dark;
 }
 
@@ -268,4 +273,184 @@ label.chip {
   flex: 1;
   padding-inline: 4px;
   text-align: center;
+}
+
+/* --- Главный экран --- */
+
+.summary {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.summary-cells {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.summary .label {
+  margin-bottom: 2px;
+}
+
+.summary-cells strong {
+  font-size: 22px;
+}
+
+/* Чего нет в итоге: сразу под числами и обычным цветом текста, не серой сноской. */
+.exclusion {
+  margin: 10px 0 0;
+  font-size: 14px;
+}
+
+.exclusion:empty {
+  display: none;
+}
+
+.difference {
+  margin: 10px 0 0;
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.difference:empty {
+  display: none;
+}
+
+.difference small {
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.gain {
+  color: var(--gain);
+}
+
+.loss {
+  color: var(--loss);
+}
+
+.rows,
+.history {
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.row-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+}
+
+.row-head strong {
+  font-size: 18px;
+}
+
+.row-head .qty {
+  color: var(--muted);
+}
+
+.row-diff {
+  margin-left: auto;
+  font-weight: 600;
+}
+
+.row-detail {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+#failed .notice {
+  margin-top: 12px;
+}
+
+#price-note {
+  margin-top: 12px;
+}
+
+details {
+  margin-top: 14px;
+}
+
+/* display:flex прячет стрелку раскрытия, поэтому своя: иначе строка читается
+   как серый текст, а не как то, что можно открыть. */
+summary {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+summary::before {
+  content: '▸';
+  margin-right: 8px;
+}
+
+details[open] > summary::before {
+  content: '▾';
+}
+
+.op {
+  display: flex;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+
+.op time {
+  flex: none;
+  color: var(--muted);
+}
+
+/* Операция, на которой расчёт остановился: обведена цветом ошибок и подписана. */
+.op.bad {
+  flex-wrap: wrap;
+  padding: 8px;
+  border: 1px solid var(--error);
+  border-radius: 10px;
+}
+
+.op.bad .why {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--error);
+}
+
+/* Кнопка внесения всегда под большим пальцем: список ниже может быть длинным. */
+.add-bar {
+  position: sticky;
+  bottom: 0;
+  margin: 12px -16px 0;
+  padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+  background: linear-gradient(to top, var(--bg) 70%, transparent);
+}
+
+.add-bar .primary {
+  margin-top: 0;
+}
+
+#back {
+  margin-bottom: 12px;
+}
+
+/* Переключатель портфелей: названия бывают длинными, ряд переносится. */
+#portfolio-tabs {
+  flex-wrap: wrap;
+}
+
+#portfolio-tabs .chip {
+  flex: 0 1 auto;
+  padding-inline: 14px;
 }

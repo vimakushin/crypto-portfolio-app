@@ -25,7 +25,7 @@
 export const SCALE = 10n ** 30n;
 
 // Деление с округлением до ближайшего. Отрицательных чисел в расчёте нет.
-function divide(a, b) {
+export function divide(a, b) {
   return (2n * a + b) / (2n * b);
 }
 
