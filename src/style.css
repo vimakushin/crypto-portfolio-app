@@ -496,3 +496,78 @@ textarea {
 #paste-box {
   margin-top: 12px;
 }
+
+/* --- Экран монеты --- */
+.row[role='button'] {
+  cursor: pointer;
+}
+
+.row[role='button']:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+.row-head .chevron {
+  color: var(--muted);
+}
+
+.coin-line {
+  margin: 10px 0 0;
+}
+
+.coin-line:empty {
+  display: none;
+}
+
+#coin-screen h2 {
+  margin: 22px 0 0;
+  font-size: 16px;
+}
+
+#coin-failed .notice {
+  margin-top: 12px;
+}
+
+/* Строка истории монеты: запись, кнопка «Удалить», а под ними — подтверждение
+   или причина отказа на всю ширину. */
+.coin-op {
+  flex-wrap: wrap;
+  align-items: baseline;
+}
+
+.coin-op .text {
+  flex: 1 1 10em;
+}
+
+.coin-op .chip {
+  flex: none;
+  min-height: 44px;
+  padding: 4px 12px;
+}
+
+.coin-op .confirm,
+.coin-op .refusal {
+  flex-basis: 100%;
+  margin: 4px 0 0;
+}
+
+.coin-op .refusal {
+  color: var(--error);
+}
+
+.coin-op .confirm .chip {
+  margin-right: 8px;
+}
+
+/* Запись, о которой спрашивают, и запись, из-за которой удалить нельзя. */
+.coin-op.asking {
+  padding: 8px;
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.coin-op.blocker {
+  padding: 8px;
+  border: 1px dashed var(--error);
+  border-radius: 10px;
+}

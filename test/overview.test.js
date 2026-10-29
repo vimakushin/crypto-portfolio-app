@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { calculate, parseAmount, SCALE } from '../src/calc.js';
-import { history, overview } from '../src/overview.js';
+import { coinDetail, history, overview, removalCheck } from '../src/overview.js';
 
 const units = (text) => parseAmount(text);
 const buy = (date, portfolio, money, price, coin = 'solana', symbol = 'SOL') => ({ type: 'buy', date, coin, symbol, portfolio, money, price });
@@ -204,4 +204,201 @@ test('монета без привязки рядом с монетой с це�
   assert.equal(totals.value, units('600'));
   assert.equal(totals.cost, units('400'));
   assert.deepEqual(excluded, [{ symbol: 'ПЕПЕ', cost: units('10'), why: 'unbound' }]);
+});
+
+// --- Экран монеты и удаление записи ---
+
+const SOL = 'solana';
+const withoutOp = (operations, index) => operations.filter((_, position) => position !== index);
+
+test('экран монеты: монета целиком совпадает со строкой главного экрана, портфели — со своими средними', () => {
+  const operations = [
+    buy('2026-01-10', 'Binance', '100', '100'),
+    buy('2026-01-20', 'Bybit', '300', '150'),
+    transfer('2026-02-01', 'Bybit', 'Binance', '1', '1'),
+  ];
+  const detail = coinDetail(operations, SOL, prices({ solana: '200' }));
+  const main = overview(operations, prices({ solana: '200' })).rows[0];
+  assert.deepEqual(detail.total, main);
+  // Binance: 1 монета по 100 и 1 по 150 (перешла с Bybit): 2 монеты, 250 $; в Bybit осталась 2 монеты по 150 минус 1 переведённая.
+  const names = detail.portfolios.map((p) => p.name);
+  assert.deepEqual(names.sort(), ['Binance', 'Bybit']);
+  const binance = detail.portfolios.find((p) => p.name === 'Binance');
+  const bybit = detail.portfolios.find((p) => p.name === 'Bybit');
+  assert.equal(binance.quantity, units('2'));
+  assert.equal(binance.cost, units('250'));
+  assert.equal(binance.average, units('125'));
+  assert.equal(bybit.average, units('150'));
+  // Вложено по портфелям складывается во вложенное по монете.
+  assert.equal(detail.portfolios.reduce((sum, p) => sum + p.cost, 0n), detail.total.cost);
+});
+
+test('экран монеты: история только этой монеты, новые сверху; чужая монета не попадает', () => {
+  const operations = [
+    buy('2026-01-10', 'Binance', '100', '100'),
+    buy('2026-01-12', 'Binance', '50', '25', 'bitcoin', 'BTC'),
+    buy('2026-01-20', 'Binance', '300', '150'),
+  ];
+  assert.deepEqual(coinDetail(operations, SOL, null).entries.map(({ index }) => index), [2, 0]);
+  assert.equal(coinDetail(operations, 'bitcoin', null).entries.length, 1);
+});
+
+test('экран монеты: полностью проданный портфель в список не попадает', () => {
+  const operations = [buy('2026-01-10', 'Binance', '100', '100'), buy('2026-01-11', 'Bybit', '100', '100'), sell('2026-01-12', 'Bybit', '1', '120')];
+  assert.deepEqual(coinDetail(operations, SOL, null).portfolios.map((p) => p.name), ['Binance']);
+});
+
+test('экран монеты: монета, которую расчёт не посчитал, называет запись, а строки нет', () => {
+  const operations = [buy('2026-01-10', 'Binance', '100', '100'), sell('2026-01-11', 'Binance', '5', '120')];
+  const detail = coinDetail(operations, SOL, null);
+  assert.equal(detail.total, null);
+  assert.equal(detail.failed.operation, operations[1]);
+  assert.equal(detail.entries.length, 2);
+});
+
+test('удаление: покупку, на которой держится более поздняя продажа, удалить нельзя, и названа именно продажа', () => {
+  const operations = [buy('2026-01-10', 'Binance', '100', '100'), buy('2026-01-15', 'Binance', '100', '100'), sell('2026-01-20', 'Binance', '1.5', '120')];
+  const refused = removalCheck(operations, 1);
+  assert.equal(refused.ok, false);
+  assert.equal(refused.operation, operations[2]);
+  assert.match(refused.message, /нет столько монет/);
+  // Без первой покупки остаётся 1 монета, а продаётся 1.5: тоже нельзя.
+  assert.equal(removalCheck(operations, 0).ok, false);
+});
+
+test('удаление: запись, от которой ничего не зависит, удаляется, и пересчёт совпадает с расчётом с нуля', () => {
+  const operations = [buy('2026-01-10', 'Binance', '100', '100'), sell('2026-01-20', 'Binance', '0.5', '120'), buy('2026-02-01', 'Binance', '200', '200')];
+  assert.deepEqual(removalCheck(operations, 2), { ok: true });
+  const after = overview(withoutOp(operations, 2), null);
+  const fromScratch = calculate([operations[0], operations[1]]).coins.get(SOL);
+  assert.equal(after.rows[0].quantity, fromScratch.quantity);
+  assert.equal(after.rows[0].average, fromScratch.average);
+  assert.equal(after.rows[0].cost, fromScratch.cost);
+});
+
+test('удаление единственной покупки монеты разрешено, монета с главного экрана уходит', () => {
+  const operations = [buy('2026-01-10', 'Binance', '100', '100')];
+  assert.deepEqual(removalCheck(operations, 0), { ok: true });
+  assert.equal(overview(withoutOp(operations, 0), null).rows.length, 0);
+});
+
+test('удаление перевода: проверяются оба конца — и откуда ушло, и куда пришло', () => {
+  // Перевод Bybit → Binance, потом продажа в Binance того, что пришло.
+  const operations = [
+    buy('2026-01-10', 'Bybit', '200', '100'),
+    transfer('2026-01-15', 'Bybit', 'Binance', '2', '2'),
+    sell('2026-01-20', 'Binance', '1.5', '120'),
+  ];
+  const refused = removalCheck(operations, 1);
+  assert.equal(refused.ok, false, 'без перевода в Binance нечего продавать');
+  assert.equal(refused.operation, operations[2]);
+  // Продажу удалить можно: монеты остаются там, куда пришли.
+  assert.equal(removalCheck(operations, 2).ok, true);
+  // Покупку, из которой ушёл перевод, удалить нельзя: переводить стало нечего.
+  const sourceRefused = removalCheck(operations, 0);
+  assert.equal(sourceRefused.ok, false);
+  assert.equal(sourceRefused.operation, operations[1]);
+});
+
+test('удаление перевода без последствий: средние после удаления совпадают с расчётом с нуля', () => {
+  const operations = [
+    buy('2026-01-10', 'Binance', '100', '100'),
+    buy('2026-01-12', 'Bybit', '150', '150'),
+    transfer('2026-01-15', 'Bybit', 'Binance', '0.4', '0.399'),
+  ];
+  assert.equal(removalCheck(operations, 2).ok, true);
+  const rest = withoutOp(operations, 2);
+  const detail = coinDetail(rest, SOL, null);
+  const scratch = calculate(rest).coins.get(SOL);
+  assert.equal(detail.total.average, scratch.average);
+  assert.equal(detail.total.cost, scratch.cost);
+  for (const p of detail.portfolios) assert.equal(p.average, scratch.portfolios.get(p.name).average);
+});
+
+test('удаление не трогает другие монеты: BTC ни от чего не зависит, а SOL зависит от своей покупки', () => {
+  const operations = [buy('2026-01-10', 'Binance', '100', '100'), buy('2026-01-10', 'Binance', '50', '25', 'bitcoin', 'BTC'), sell('2026-01-20', 'Binance', '1', '120')];
+  assert.equal(removalCheck(operations, 1).ok, true);
+  assert.equal(removalCheck(operations, 0).ok, false);
+});
+
+test('монету, которая уже не считалась, можно чинить удалением дурной записи', () => {
+  const operations = [buy('2026-01-10', 'Binance', '100', '100'), sell('2026-01-11', 'Binance', '5', '120')];
+  assert.equal(removalCheck(operations, 1).ok, true);
+  assert.equal(overview(withoutOp(operations, 1), null).failed.length, 0);
+});
+
+test('монета не считалась, а удаление дурной записи вскрыло бы ещё одну поломку: отказ называет её', () => {
+  // Расчёт останавливается на плохой продаже; после её удаления перевод позже оказался бы без монет.
+  const operations = [
+    buy('2026-01-10', 'Binance', '100', '100'),
+    sell('2026-01-11', 'Binance', '5', '120'),
+    transfer('2026-01-12', 'Binance', 'Bybit', '3', '3'),
+  ];
+  const refused = removalCheck(operations, 1);
+  assert.equal(refused.ok, false);
+  assert.equal(refused.operation, operations[2]);
+});
+
+test('удаление несвязанной записи у монеты, которая и так не считалась, разрешено: старая поломка не считается новой', () => {
+  // Продажа 5 SOL при одной купленной ломает расчёт и без третьей записи; удаление третьей ничего не вскрывает.
+  const operations = [
+    buy('2026-01-10', 'Binance', '100', '100'),
+    sell('2026-01-11', 'Binance', '5', '120'),
+    buy('2026-01-12', 'Binance', '10', '100'),
+  ];
+  assert.equal(removalCheck(operations, 2).ok, true);
+});
+
+test('полностью проданная монета: на экране монеты нет позиции, записи есть', () => {
+  const operations = [buy('2026-01-10', 'Binance', '100', '100'), buy('2026-01-11', 'Binance', '100', '100'), sell('2026-01-12', 'Binance', '1', '120')];
+  // Удаление второй покупки допустимо (продажа прикрыта первой) и оставляет ноль монет.
+  assert.equal(removalCheck(operations, 1).ok, true);
+  const detail = coinDetail(withoutOp(operations, 1), SOL, null);
+  assert.equal(detail.total, null);
+  assert.equal(detail.failed, null);
+  assert.equal(detail.portfolios.length, 0);
+  assert.equal(detail.entries.length, 2);
+});
+
+test('отмена внесённой позже записи проходит ту же проверку: покупка задним числом держит продажу, когда первую удалили', () => {
+  // Внесены по порядку: покупка 1.01, продажа 10.01, покупка 5.01 (последней). Первую покупку удалили: продажу прикрывает третья.
+  const operations = [buy('2026-01-01', 'Binance', '100', '100'), sell('2026-01-10', 'Binance', '1', '120'), buy('2026-01-05', 'Binance', '100', '100')];
+  assert.equal(removalCheck(operations, 0).ok, true);
+  const afterDeletion = withoutOp(operations, 0);
+  // «Отмена последней» = удаление последней записи: теперь оно сломало бы продажу.
+  const refused = removalCheck(afterDeletion, afterDeletion.length - 1);
+  assert.equal(refused.ok, false);
+  assert.equal(refused.operation, afterDeletion[0]);
+});
+
+test('удаление несвязанной записи у монеты, которая и так не считалась, разрешено: старая поломка не считается новой', () => {
+  // Продажа 5 SOL при одной купленной ломает расчёт и без третьей записи; удаление третьей ничего не вскрывает.
+  const operations = [
+    buy('2026-01-10', 'Binance', '100', '100'),
+    sell('2026-01-11', 'Binance', '5', '120'),
+    buy('2026-01-12', 'Binance', '10', '100'),
+  ];
+  assert.equal(removalCheck(operations, 2).ok, true);
+});
+
+test('полностью проданная монета: на экране монеты нет позиции, записи есть', () => {
+  const operations = [buy('2026-01-10', 'Binance', '100', '100'), buy('2026-01-11', 'Binance', '100', '100'), sell('2026-01-12', 'Binance', '1', '120')];
+  // Удаление второй покупки допустимо (продажа прикрыта первой) и оставляет ноль монет.
+  assert.equal(removalCheck(operations, 1).ok, true);
+  const detail = coinDetail(withoutOp(operations, 1), SOL, null);
+  assert.equal(detail.total, null);
+  assert.equal(detail.failed, null);
+  assert.equal(detail.portfolios.length, 0);
+  assert.equal(detail.entries.length, 2);
+});
+
+test('отмена внесённой позже записи проходит ту же проверку: покупка задним числом держит продажу, когда первую удалили', () => {
+  // Внесены по порядку: покупка 1.01, продажа 10.01, покупка 5.01 (последней). Первую покупку удалили: продажу прикрывает третья.
+  const operations = [buy('2026-01-01', 'Binance', '100', '100'), sell('2026-01-10', 'Binance', '1', '120'), buy('2026-01-05', 'Binance', '100', '100')];
+  assert.equal(removalCheck(operations, 0).ok, true);
+  const afterDeletion = withoutOp(operations, 0);
+  // «Отмена последней» = удаление последней записи: теперь оно сломало бы продажу.
+  const refused = removalCheck(afterDeletion, afterDeletion.length - 1);
+  assert.equal(refused.ok, false);
+  assert.equal(refused.operation, afterDeletion[0]);
 });

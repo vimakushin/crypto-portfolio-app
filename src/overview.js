@@ -90,3 +90,38 @@ export function history(operations, only = null) {
     .filter(({ op }) => only === null || touches(op, only))
     .sort((a, b) => (a.op.date === b.op.date ? b.index - a.index : a.op.date < b.op.date ? 1 : -1));
 }
+
+// Экран одной монеты: она целиком, по портфелям и её история. total — та же
+// строка, что на главном экране (null, если монету расчёт не посчитал);
+// portfolios — только те, где монета есть сейчас, с собственной средней;
+// failed — на какой записи расчёт остановился, если остановился.
+export function coinDetail(operations, key, prices) {
+  const { rows, failed } = overview(operations, prices);
+  const position = calculate(operations).coins.get(key);
+  const portfolios = [...(position?.portfolios ?? [])]
+    .filter(([, p]) => p.quantity > 0n)
+    .map(([name, p]) => ({ name, quantity: p.quantity, average: p.average, cost: p.cost }))
+    .sort((a, b) => (a.cost === b.cost ? a.name.localeCompare(b.name) : a.cost > b.cost ? -1 : 1));
+  return {
+    total: rows.find((row) => row.key === key) ?? null,
+    portfolios,
+    failed: failed.find((f) => f.key === key) ?? null,
+    entries: history(operations).filter(({ op }) => coinKey(op) === key),
+  };
+}
+
+// Можно ли удалить запись. Удаление покупки оставляет без монет более позднюю
+// продажу или перевод, удаление перевода — продажу в портфеле, куда монеты
+// пришли: расчёт монеты по всей истории показывает и тот, и другой конец. Если
+// после удаления появляется запись, на которой расчёт останавливается, а до
+// удаления она была в порядке, удалять нельзя, и ответ называет эту запись.
+// Запись, которая и так не считалась, удалить можно: это способ починить.
+export function removalCheck(operations, index) {
+  const key = coinKey(operations[index]);
+  const errorsOf = (list) => calculate(list).errors.filter((error) => error.coin === key);
+  const already = new Set(errorsOf(operations).map((error) => error.operation));
+  const rest = operations.filter((_, position) => position !== index);
+  const broken = errorsOf(rest).find((error) => !already.has(error.operation));
+  if (!broken) return { ok: true };
+  return { ok: false, operation: broken.operation, message: broken.message.replace(/^Операция от [^:]*: /, '') };
+}

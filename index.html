@@ -42,6 +42,8 @@
       </div>
       <div id="failed"></div>
       <ul class="rows" id="rows"></ul>
+      <p class="hint" id="rows-hint" hidden>Нажмите на монету: её портфели, история и удаление записи.</p>
+      <p class="hint" id="main-message" role="status"></p>
       <p class="hint" id="rows-empty" hidden>Сейчас ничего нет.</p>
       <p class="hint" id="price-note"></p>
       <button type="button" class="chip" id="prices-again" hidden>Обновить цены</button>
@@ -54,6 +56,26 @@
     <div class="add-bar" id="add-bar" hidden><button type="button" class="primary" id="add">Внести операцию</button></div>
 
     <button type="button" class="chip" id="back" hidden>← К портфелю</button>
+
+    <!-- Экран монеты: она целиком, по портфелям, её история и удаление записи. -->
+    <section id="coin-screen" aria-label="Монета" hidden>
+      <div id="coin-save"></div>
+      <div class="summary">
+        <div class="summary-cells">
+          <div><span class="label">Вложено</span><strong id="coin-cost"></strong></div>
+          <div><span class="label">Сейчас стоит</span><strong id="coin-value"></strong></div>
+        </div>
+        <p class="coin-line" id="coin-line"></p>
+        <p class="difference" id="coin-difference"></p>
+        <p class="hint" id="coin-note"></p>
+      </div>
+      <div id="coin-failed"></div>
+      <h2 id="coin-portfolios-title">По портфелям</h2>
+      <ul class="rows" id="coin-portfolios"></ul>
+      <h2>История монеты</h2>
+      <p class="hint" id="coin-message" role="status"></p>
+      <ol class="history" id="coin-history"></ol>
+    </section>
 
     <!-- Поля трёх операций в одной форме: монета, цена и дата у них общие.
          data-modes — при каких операциях поле видно. -->

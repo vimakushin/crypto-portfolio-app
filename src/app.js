@@ -1,5 +1,5 @@
 import { calculate, checkHistory, coinKey, formatAmount, formatSignificant, isDate, parseAmount, SCALE } from './calc.js';
-import { history, overview } from './overview.js';
+import { coinDetail, history, overview, removalCheck } from './overview.js';
 import { fetchPrices, searchCoins } from './prices.js';
 import { createStore, makeExport, pickBackend, readExport, readPasted } from './storage.js';
 import { insideTelegram, loadTelegram, telegramReady } from './telegram.js';
@@ -616,7 +616,9 @@ function readSell(date) {
         : `В ${from} осталось ${show(left.quantity)} ${coin.symbol}, средняя там прежняя: ${showPrice(wasAverage)} $.`);
       if (after.quantity > 0n) {
         // Общая средняя может сдвинуться: изменилось, сколько монет в каком портфеле.
-        lines.push(`Всего ${coin.symbol}: ${show(after.quantity)}. Средняя по всем портфелям ` + (changed(before.average, after.average)
+        // «По всем портфелям» — только когда монета лежит больше чем в одном: иначе «по всем чего».
+        const holders = [...after.portfolios.values()].filter((p) => p.quantity > 0n).length;
+        lines.push(`Всего ${coin.symbol}: ${show(after.quantity)}. Средняя ${holders > 1 ? 'по всем портфелям ' : ''}` + (changed(before.average, after.average)
           ? `${showPrice(before.average)} → ${showPrice(after.average)} $: монет стало меньше там, где они куплены по ${showPrice(wasAverage)} $, а в других портфелях они куплены по другой цене.`
           : `не изменилась: ${showPrice(after.average)} $.`));
       }
@@ -722,7 +724,7 @@ form.addEventListener('submit', (event) => {
     return;
   }
   if (staleCloud) {
-    text('record-error', 'Данные на другом устройстве изменились. Сначала нажмите «Перечитать» под кнопкой, иначе то, что вы внесёте здесь, затрёт их.');
+    text('record-error', STALE_REFUSAL);
     return;
   }
   const broken = brokenBy(read.operation);
@@ -775,19 +777,10 @@ form.addEventListener('submit', (event) => {
   if (coin.id === null && mode === 'buy') offerBinding();
 });
 
-// Отмена последней записи. Безопасна всегда: возвращает к состоянию, которое
-// уже было проверено расчётом.
-document.getElementById('undo').addEventListener('click', () => {
-  const index = operations.indexOf(last?.operation);
-  if (index === -1) return;
-  const { operation } = last;
-  operations.splice(index, 1);
-  // Отменённая запись могла входить в подтверждённые; без этого внесённая вместо
-  // неё исправленная записалась бы в «подтверждённые» и защита от повторного
-  // ввода её не увидела бы.
-  confirmedCount = Math.min(confirmedCount, operations.length);
-  // Монета без цены, у которой не осталось записей, из списка уходит.
-  // Выбранной она тоже перестаёт быть — и здесь, и в запомненных вкладках.
+// После отмены или удаления записи: монета без цены, у которой не осталось
+// записей, из списка уходит. Выбранной она тоже перестаёт быть — и здесь, и в
+// запомненных вкладках. И портфель, заведённый только этой записью, — тоже.
+function forgetUnused() {
   for (const coin of coins.filter((known) => known.id === null && !operations.some((op) => coinOf(op) === known))) {
     coins.splice(coins.indexOf(coin), 1);
     if (selectedCoin !== null && sameCoin(selectedCoin, coin)) selectedCoin = null;
@@ -795,7 +788,6 @@ document.getElementById('undo').addEventListener('click', () => {
       if (choice.coin && sameCoin(choice.coin, coin)) choice.coin = null;
     }
   }
-  // И портфель, заведённый этой записью, — тоже.
   const used = new Set(operations.flatMap((op) => [op.portfolio, op.from, op.to]));
   for (const name of portfolios.filter((known) => !used.has(known))) portfolios.splice(portfolios.indexOf(name), 1);
   const previousCoin = selectedCoin;
@@ -804,6 +796,27 @@ document.getElementById('undo').addEventListener('click', () => {
     dropPrice();
     text('price-source', '');
   }
+}
+
+// Отмена последней записи. Раньше возвращала к уже проверенному состоянию, но
+// после удаления записей на экране монеты это не так: внесённая задним числом
+// запись могла прикрывать продажу, оставшуюся без монет, когда удалили покупку.
+// Поэтому отмена проходит ту же проверку, что и удаление.
+document.getElementById('undo').addEventListener('click', () => {
+  const index = operations.indexOf(last?.operation);
+  if (index === -1) return;
+  const { operation } = last;
+  const check = removalCheck(operations, index);
+  if (!check.ok) {
+    say(`Отменить нельзя: на этой записи держится другая — ${fullName(check.operation)} (${check.message}). Сначала удалите её на экране монеты.`, operation);
+    return;
+  }
+  operations.splice(index, 1);
+  // Отменённая запись могла входить в подтверждённые; без этого внесённая вместо
+  // неё исправленная записалась бы в «подтверждённые» и защита от повторного
+  // ввода её не увидела бы.
+  confirmedCount = Math.min(confirmedCount, operations.length);
+  forgetUnused();
   render();
   say(`Отменено: ${shortName(operation)}, ${showDate(operation.date)}`);
   persist();
@@ -978,16 +991,20 @@ function rowItem(row) {
   head.append(row.value === null
     ? el('span', 'row-diff qty', row.why === 'unbound' ? 'без цены' : 'нет цены')
     : el('span', `row-diff ${tone(row.difference)}`, `${signed(row.difference)} (${signedPercent(row.percent)})`));
-  const detail = el('div', 'row-detail', `${viewPortfolio === null ? 'средняя по всем' : `средняя в ${viewPortfolio}`} ${averageText(row.average)} $ · вложено ${dollars(row.cost)} $ · сейчас ${row.value === null ? noValueReason(row) : `${dollars(row.value)} $`}`);
+  const detail = el('div', 'row-detail', `${viewPortfolio === null ? (portfolios.length > 1 ? 'средняя по всем' : 'средняя') : `средняя в ${viewPortfolio}`} ${averageText(row.average)} $ · вложено ${dollars(row.cost)} $ · сейчас ${row.value === null ? noValueReason(row) : `${dollars(row.value)} $`}`);
+  head.append(el('span', 'chevron', '›'));
   const item = el('li', 'row');
   item.append(head, detail);
+  // Нажатие открывает экран монеты: её портфели, история и удаление записи.
+  item.tabIndex = 0;
+  item.setAttribute('role', 'button');
+  item.addEventListener('click', () => openCoin(row.key));
+  item.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    openCoin(row.key);
+  });
   return item;
-}
-
-function openHistoryAt(operation) {
-  byId('history').open = true;
-  const index = operations.indexOf(operation);
-  byId('history-list').querySelector(`[data-index="${index}"]`)?.scrollIntoView({ block: 'center' });
 }
 
 function renderTabs() {
@@ -999,6 +1016,7 @@ function renderTabs() {
 }
 
 function renderOverview() {
+  if (view === 'coin') return renderCoin();
   if (byId('overview').hidden) return;
   renderTabs();
   const { rows, totals, excluded, failed } = overview(operations, priceState.prices, viewPortfolio);
@@ -1026,15 +1044,17 @@ function renderOverview() {
     : 'Стоимости нет ни у одной монеты: у каждой ниже написана причина.');
 
   byId('rows').replaceChildren(...rows.map(rowItem));
+  byId('rows-hint').hidden = rows.length === 0;
+  text('main-message', mainMessage);
   byId('rows-empty').hidden = rows.length > 0 || failed.length > 0;
 
   byId('failed').replaceChildren(...failed.map((f) => {
     const box = el('div', 'notice alert');
     const message = el('p', '');
     message.append(el('strong', '', `${f.symbol} не посчитана: `), document.createTextNode(`${f.message}. В итог она не входит.`));
-    const find = el('button', 'chip', 'Найти запись в истории');
+    const find = el('button', 'chip', 'Открыть монету и найти запись');
     find.type = 'button';
-    find.addEventListener('click', () => openHistoryAt(f.operation));
+    find.addEventListener('click', () => openCoin(f.key));
     box.append(message, find);
     return box;
   }));
@@ -1042,9 +1062,8 @@ function renderOverview() {
   const bad = new Map(failed.map((f) => [f.operation, f.message]));
   const entries = history(operations, viewPortfolio);
   byId('history-title').textContent = `История операций (${entries.length})`;
-  byId('history-list').replaceChildren(...entries.map(({ op, index }) => {
+  byId('history-list').replaceChildren(...entries.map(({ op }) => {
     const item = el('li', bad.has(op) ? 'op bad' : 'op');
-    item.dataset.index = String(index);
     item.append(el('time', '', showDate(op.date)), el('span', '', opText(op)));
     if (bad.has(op)) item.append(el('p', 'why', `На этой записи расчёт остановился: ${bad.get(op)}`));
     return item;
@@ -1079,23 +1098,166 @@ function refreshHeader() {
   if (view === 'entry') byId('title').textContent = first ? 'Учёт криптовалют' : screenTitles.entry;
 }
 const screenTitles = { main: 'Портфель', entry: 'Новая запись', data: 'Данные' };
+const coinTitle = () => {
+  const op = operations.find((candidate) => coinKey(candidate) === viewCoin);
+  const known = coins.find((coin) => keyOf(coin) === viewCoin);
+  return op === undefined ? '' : known?.name && known.name !== op.symbol ? `${op.symbol} · ${known.name}` : op.symbol;
+};
 
 function showView(name) {
+  if (name !== 'main') mainMessage = '';
   if (name === 'data' && view !== 'data') cameFrom = view;
   view = name;
   byId('overview').hidden = name !== 'main';
+  byId('coin-screen').hidden = name !== 'coin';
   byId('add-bar').hidden = name !== 'main';
   byId('open-data').hidden = name !== 'main';
   byId('modes').hidden = name !== 'entry';
   form.hidden = name !== 'entry';
   byId('data').hidden = name !== 'data';
-  byId('title').textContent = screenTitles[name];
+  byId('title').textContent = name === 'coin' ? coinTitle() : screenTitles[name];
   refreshHeader();
   if (name === 'main') byId('main-save').append(byId('save-block'));
+  else if (name === 'coin') byId('coin-save').append(byId('save-block'));
   else if (name === 'data') byId('data-save').append(byId('save-block'));
   else byId('unbound').before(byId('save-block'));
   // loadPrices сразу перерисовывает экран, отдельный вызов не нужен.
   if (name === 'main') loadPrices();
+  if (name === 'coin') renderCoin();
+}
+
+// --- Экран монеты ---
+//
+// Монета целиком, по портфелям и её история; у каждой записи — «Удалить».
+// Удаление не молчит и не каскадирует: если без записи другая станет
+// невозможной, говорим какая, и отказываем (см. removalCheck). Исправления
+// записи нет: ошибочную удаляют и вносят заново.
+let viewCoin = null;
+// Что сказать на главном экране после удаления: если у монеты не осталось записей,
+// экран монеты закрывается, и сказать там уже негде.
+let mainMessage = '';
+// Запись, у которой спросили подтверждение; и запись, которую удалить нельзя, с причиной.
+let pendingDelete = null;
+let refusal = null;
+
+function openCoin(key) {
+  viewCoin = key;
+  pendingDelete = null;
+  refusal = null;
+  text('coin-message', '');
+  showView('coin');
+  window.scrollTo(0, 0);
+}
+
+function askDelete(operation) {
+  pendingDelete = null;
+  refusal = null;
+  text('coin-message', '');
+  if (staleCloud) {
+    text('coin-message', STALE_REFUSAL);
+    return renderCoin();
+  }
+  const check = removalCheck(operations, operations.indexOf(operation));
+  if (check.ok) pendingDelete = operation;
+  else refusal = { operation, blocker: check.operation, text: `Нельзя удалить: на этой записи держится другая — ${fullName(check.operation)} (${check.message}). Чтобы удалить эту, сначала удалите ту.` };
+  renderCoin();
+}
+
+function deleteOperation(operation) {
+  // Пока висел вопрос, сохранение могло вернуть «данные изменились на другом устройстве».
+  if (staleCloud) {
+    pendingDelete = null;
+    text('coin-message', STALE_REFUSAL);
+    return renderCoin();
+  }
+  const index = operations.indexOf(operation);
+  const before = coinDetail(operations, viewCoin, priceState.prices).total;
+  operations.splice(index, 1);
+  // Подтверждённых записей стало на одну меньше, если удалённая была среди них.
+  if (index < confirmedCount) confirmedCount -= 1;
+  if (last?.operation === operation) say('');
+  pendingDelete = null;
+  forgetUnused();
+  render();
+  persist();
+  const after = coinDetail(operations, viewCoin, priceState.prices);
+  const done = `Удалено: ${fullName(operation)}.`;
+  if (after.entries.length === 0) {
+    mainMessage = `${done} ${operation.symbol} больше нет в портфеле.`;
+    return renderCoin();
+  }
+  const change = before !== null && after.total !== null
+    ? ` Средняя по монете: ${averageText(before.average)}\u00a0$ → ${averageText(after.total.average)}\u00a0$, вложено ${dollars(before.cost)}\u00a0$ → ${dollars(after.total.cost)}\u00a0$.`
+    : '';
+  text('coin-message', `${done} Всё пересчитано заново по оставшимся записям.${change}`);
+  byId('coin-message').scrollIntoView({ block: 'nearest' });
+  renderCoin();
+}
+
+function renderCoin() {
+  const detail = coinDetail(operations, viewCoin, priceState.prices);
+  // Удалили последнюю запись монеты — монеты больше нет, возвращаемся.
+  if (detail.entries.length === 0) return showView('main');
+  byId('title').textContent = coinTitle();
+  const { total, portfolios: where, failed } = detail;
+  const symbol = detail.entries[0].op.symbol;
+
+  byId('coin-cost').textContent = total === null ? '—' : `${dollars(total.cost)} $`;
+  byId('coin-value').textContent = total === null || total.value === null ? '—' : `${dollars(total.value)} $`;
+  // «Общая» и «в портфеле» — разные средние: подписано, какая из них какая.
+  text('coin-line', total === null ? (failed === null ? 'Сейчас этой монеты нет: всё продано.' : '')
+    : `${show(total.quantity)} ${symbol} · ${where.length > 1 ? 'средняя по всем портфелям' : 'средняя'} ${averageText(total.average)} $`);
+  const difference = byId('coin-difference');
+  difference.className = `difference ${total === null || total.difference === null ? '' : tone(total.difference)}`;
+  difference.replaceChildren(...(total === null || total.difference === null ? [] : [
+    el('small', '', 'Разница '),
+    document.createTextNode(`${signed(total.difference)} `),
+    ...(total.percent === null ? [] : [el('small', '', `${signedPercent(total.percent)} к вложенному`)]),
+  ]));
+  text('coin-note', total === null || total.value !== null ? ''
+    : total.why === 'unbound' ? 'Текущей стоимости нет: монета не привязана к CoinGecko (привязка — при внесении).'
+    : priceState.status === 'loading' ? 'Цены загружаются…'
+    : priceState.status === 'failed' ? `Текущей стоимости нет: ${priceState.reason}.`
+    : 'Текущей стоимости нет: CoinGecko не прислал цену.');
+
+  byId('coin-failed').replaceChildren(...(failed === null ? [] : [(() => {
+    const box = el('div', 'notice alert');
+    box.append(el('p', '', `${symbol} не посчитана: ${failed.message}. В итог она не входит. Запись, на которой расчёт остановился, отмечена ниже: её можно удалить.`));
+    return box;
+  })()]));
+
+  byId('coin-portfolios-title').hidden = where.length === 0;
+  byId('coin-portfolios').replaceChildren(...where.map((p) => {
+    const head = el('div', 'row-head');
+    head.append(el('strong', '', p.name), el('span', 'qty', `${show(p.quantity)} ${symbol}`));
+    const item = el('li', 'row');
+    item.append(head, el('div', 'row-detail', `средняя только в этом портфеле ${averageText(p.average)} $ · вложено ${dollars(p.cost)} $`));
+    return item;
+  }));
+
+  byId('coin-history').replaceChildren(...detail.entries.map(({ op }) => {
+    const bad = failed !== null && failed.operation === op;
+    const item = el('li', `op coin-op${bad ? ' bad' : ''}${pendingDelete === op ? ' asking' : ''}${refusal?.blocker === op ? ' blocker' : ''}`);
+    const remove = el('button', 'chip', 'Удалить');
+    remove.type = 'button';
+    remove.addEventListener('click', () => askDelete(op));
+    item.append(el('time', '', showDate(op.date)), el('span', 'text', opText(op)), remove);
+    if (bad) item.append(el('p', 'why', `На этой записи расчёт остановился: ${failed.message}`));
+    if (pendingDelete === op) {
+      const confirm = el('div', 'confirm');
+      confirm.append(el('p', '', `Удалить запись: ${fullName(op)}? Вернуть её потом нельзя. Средние и итоги пересчитаются по оставшимся записям.`));
+      const yes = el('button', 'chip danger', 'Да, удалить');
+      yes.type = 'button';
+      yes.addEventListener('click', () => deleteOperation(op));
+      const no = el('button', 'chip', 'Не удалять');
+      no.type = 'button';
+      no.addEventListener('click', () => { pendingDelete = null; renderCoin(); });
+      confirm.append(yes, no);
+      item.append(confirm);
+    }
+    if (refusal?.operation === op) item.append(el('p', 'refusal', refusal.text));
+    return item;
+  }));
 }
 
 // --- Хранение ---
@@ -1167,6 +1329,7 @@ let confirmedCount = 0;
 // Другое устройство сохранилось позже, и здесь показано устаревшее. Пока человек
 // не перечитал, новые записи не принимаются: сохранить их значило бы затереть чужое.
 let staleCloud = false;
+const STALE_REFUSAL = 'Данные на другом устройстве изменились. Сначала нажмите «Перечитать» под кнопкой, иначе то, что вы измените здесь, затрёт их.';
 
 // Какие записи не сохранены, — чтобы человеку не пришлось вспоминать.
 function unsavedList() {
