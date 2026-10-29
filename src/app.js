@@ -76,9 +76,16 @@ function portfolioName(value) {
 }
 
 const isAmount = (value) => (parseAmount(value) ?? 0n) > 0n;
-// Количество — восемь знаков после точки, как на биржах; крошку меньше этого
-// показываем по значащим цифрам, а не нулём: «0 монет» было бы неправдой.
-const show = (units) => (units > 0n && formatAmount(units, 8) === '0' ? formatSignificant(units, 4) : formatAmount(units, 8));
+// Количество — восемь знаков после точки, как на биржах. Меньше 10⁻⁸ (это
+// наименьшая единица биткоина, и у любой монеты такое количество стоит доли
+// цента) знаки не расписываем: двадцать нулей сведений не несут, а карточку
+// портят. Но и нулём такую крошку писать нельзя — «0 монет» при средней в
+// 146 $ читалось бы как «монеты нет», хотя она есть, — поэтому «<0.00000001».
+const DUST_SHOWN = 10n ** 22n;
+// Число, которое можно положить в поле ввода и разобрать обратно: крошка там
+// показывается значащими цифрами, а не знаком «<».
+const showNumber = (units) => (units > 0n && formatAmount(units, 8) === '0' ? formatSignificant(units, 4) : formatAmount(units, 8));
+const show = (units) => (units > 0n && units < DUST_SHOWN ? '<0.00000001' : showNumber(units));
 const showPrice = (units) => formatSignificant(units, 6);
 // Средняя изменилась на деле, а не на погрешность деления в 30-м знаке:
 // настоящая разница — даже комиссия 10⁻⁸ монеты — на много порядков больше.
@@ -126,7 +133,7 @@ function amountOf(field) {
 }
 
 function setPreset(field, units) {
-  const shown = show(units);
+  const shown = showNumber(units);
   presets.set(field, { text: shown, exact: formatAmount(units, 30) });
   field.value = shown;
 }
