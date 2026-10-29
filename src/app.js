@@ -940,7 +940,12 @@ const el = (tag, className, content = '') => {
 // Доллары: два знака, тысячи через неразрывный пробел; малое — значащими
 // цифрами, чтобы 0.004 $ не превратилось в «0».
 const grouped = (whole) => whole.replace(/\B(?=(\d{3})+(?!\d))/g, '\u00a0');
+// Совсем малое (меньше миллионной доли) не расписывается нулями на всю
+// карточку: «<0.000001».
+const TINY = 10n ** 24n;
+const TINY_TEXT = '<0.000001';
 function dollars(units) {
+  if (units > 0n && units < TINY) return TINY_TEXT;
   let digits = formatAmount(units, 2);
   if (units > 0n && digits === '0') digits = formatSignificant(units, 2);
   const [whole, fraction] = digits.split('.');
@@ -954,8 +959,8 @@ const averageText = (units) => {
 const signed = (units) => (units === 0n ? '0 $' : `${units > 0n ? '+' : '−'}${dollars(units < 0n ? -units : units)} $`);
 function signedPercent(units) {
   const size = units < 0n ? -units : units;
-  let digits = formatAmount(size, 1);
-  if (size > 0n && digits === '0') digits = formatSignificant(size, 2);
+  let digits = size > 0n && size < TINY ? TINY_TEXT : formatAmount(size, 1);
+  if (size >= TINY && digits === '0') digits = formatSignificant(size, 2);
   return `${units > 0n ? '+' : units < 0n ? '−' : ''}${digits}%`;
 }
 const tone = (units) => (units > 0n ? 'gain' : units < 0n ? 'loss' : '');
@@ -988,9 +993,9 @@ function noValueReason(row) {
 function rowItem(row) {
   const head = el('div', 'row-head');
   head.append(el('strong', '', row.symbol), el('span', 'qty', show(row.quantity)));
-  head.append(row.value === null
-    ? el('span', 'row-diff qty', row.why === 'unbound' ? 'без цены' : 'нет цены')
-    : el('span', `row-diff ${tone(row.difference)}`, `${signed(row.difference)} (${signedPercent(row.percent)})`));
+  // Стоимость есть, а разницы нет (она меньше цента на порядки): рядом пусто.
+  if (row.value === null) head.append(el('span', 'row-diff qty', row.why === 'unbound' ? 'без цены' : 'нет цены'));
+  else if (row.difference !== null) head.append(el('span', `row-diff ${tone(row.difference)}`, `${signed(row.difference)} (${signedPercent(row.percent)})`));
   const detail = el('div', 'row-detail', `${viewPortfolio === null ? (portfolios.length > 1 ? 'средняя по всем' : 'средняя') : `средняя в ${viewPortfolio}`} ${averageText(row.average)} $ · вложено ${dollars(row.cost)} $ · сейчас ${row.value === null ? noValueReason(row) : `${dollars(row.value)} $`}`);
   head.append(el('span', 'chevron', '›'));
   const item = el('li', 'row');

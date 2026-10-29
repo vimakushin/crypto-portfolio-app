@@ -20,6 +20,20 @@ const percentOf = (difference, cost) => {
   return difference < 0n ? -part : part;
 };
 
+// Разница стоимости и вложенного, если она настоящая, иначе null: «разницы нет».
+// Количество монет при покупке на деньги округляется до 10⁻³⁰, и стоимость по
+// цене покупки выходит не ровно равной вложенному, а с остатком арифметики —
+// 10⁻²⁶ $ и меньше; человек видел бы «+0,000000000000000000000000022 $» сразу
+// после внесения, пока не пришла свежая цена. У денег есть наименьшая единица
+// (цент), и величина куда меньше неё деньгами не является. Порог — относительный,
+// как в changed() в app.js: 10⁻¹⁵ от вложенного. Остаток округления не больше
+// цены в единицах точности, то есть порядка 10⁻³⁰ от вложенного на каждую
+// монету количества, а настоящая разница в одну десятитысячную цента на тысячу
+// долларов — 10⁻¹⁰: между ними много порядков, и ни одна настоящая разница под
+// порог не попадает. Значения до округления для показа не сравниваются: порог
+// стоит на самой арифметике, а не на показанных знаках.
+const realDifference = (difference, cost) => ((difference < 0n ? -difference : difference) * 10n ** 15n > cost ? difference : null);
+
 const touches = (op, portfolio) => op.portfolio === portfolio || op.from === portfolio || op.to === portfolio;
 
 function rowOf(key, symbol, p, prices) {
@@ -29,7 +43,8 @@ function rowOf(key, symbol, p, prices) {
   const price = parseAmount(prices?.get(key));
   if (price === null || price === 0n) return { ...row, why: 'no-price' };
   const value = divide(p.quantity * price, SCALE);
-  return { ...row, value, difference: value - p.cost, percent: percentOf(value - p.cost, p.cost) };
+  const difference = realDifference(value - p.cost, p.cost);
+  return { ...row, value, difference, percent: difference === null ? null : percentOf(difference, p.cost) };
 }
 
 // prices — Map: код монеты → цена строкой, или null, если цен нет вовсе.
@@ -67,8 +82,9 @@ export function overview(operations, prices, only = null) {
   const counted = valued.length > 0 ? valued : rows;
   const cost = sum(counted, 'cost');
   const value = valued.length > 0 ? sum(valued, 'value') : null;
+  const difference = value === null ? null : realDifference(value - cost, cost);
   const totals = rows.length === 0 ? empty
-    : { cost, value, difference: value === null ? null : value - cost, percent: value === null ? null : percentOf(value - cost, cost) };
+    : { cost, value, difference, percent: difference === null ? null : percentOf(difference, cost) };
 
   return { rows, totals, excluded };
 }

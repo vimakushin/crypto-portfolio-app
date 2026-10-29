@@ -300,3 +300,28 @@ test('отмена внесённой позже записи проходит �
   assert.equal(refused.ok, false);
   assert.equal(refused.operation, afterDeletion[0]);
 });
+
+test('покупка и тут же цена, равная цене покупки: остаток арифметики — не разница, а настоящая разница остаётся', () => {
+  // Количество при покупке на деньги округляется до 10⁻³⁰, и стоимость по той же цене
+  // выходит не ровно равной вложенному: без порога экран показал бы «+0,000…022 $».
+  let residues = 0;
+  for (const [money, price] of [['100', '3'], ['100', '7'], ['250', '0.3'], ['1000', '97431.17'], ['50', '0.00000123'], ['333.33', '171.42']]) {
+    const operations = [buy('2026-01-10', 'Binance', money, price)];
+    const { rows, totals } = overview(operations, prices({ solana: price }));
+    const raw = rows[0].value - rows[0].cost;
+    if (raw !== 0n) residues += 1;
+    assert.equal(rows[0].difference, null, `${money} по ${price}: остаток ${raw} не разница`);
+    assert.equal(rows[0].percent, null, `${money} по ${price}: процент`);
+    assert.equal(totals.difference, null, `${money} по ${price}: итог`);
+    assert.equal(totals.percent, null, `${money} по ${price}: процент итога`);
+    // Монета на экране монеты и в портфеле — те же числа.
+    assert.equal(coinDetail(operations, SOL, prices({ solana: price })).total.difference, null);
+    assert.equal(overview(operations, prices({ solana: price }), 'Binance').rows[0].difference, null);
+  }
+  assert.ok(residues > 0, 'в примерах должен быть настоящий остаток арифметики, иначе тест ничего не проверяет');
+
+  // Малая настоящая разница не пропадает: цена на одну десятитысячную выше при вложенных 1000 $.
+  const small = overview([buy('2026-01-10', 'Binance', '1000', '100')], prices({ solana: '100.0001' })).rows[0];
+  assert.equal(small.difference, units('0.001'));
+  assert.notEqual(small.percent, null);
+});

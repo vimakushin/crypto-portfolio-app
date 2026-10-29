@@ -324,6 +324,19 @@ label.chip {
   font-size: 22px;
 }
 
+/* Длинное число переносится внутри карточки, а не раздвигает её. */
+.summary-cells > div {
+  min-width: 0;
+}
+
+.summary-cells strong,
+.difference,
+.coin-line,
+.row-diff,
+.row-detail {
+  overflow-wrap: anywhere;
+}
+
 /* Чего нет в итоге: сразу под числами и обычным цветом текста, не серой сноской. */
 .exclusion {
   margin: 10px 0 0;
