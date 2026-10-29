@@ -694,20 +694,29 @@ function shortName(op) {
 
 // Запись целиком, без даты: что куплено, сколько, за сколько, где. Продажу
 // из файла могли внести деньгами, а не количеством (см. checkOperation).
-function opText(op) {
+// exact — для тех мест, где человек читает запись, чтобы решить или внести её
+// заново (вопрос об удалении, список несохранённого): там введённое количество
+// показывается как введено, а не сокращённо до восьми знаков или «<0.00000001».
+// В строках истории сокращение остаётся ради вёрстки.
+function opText(op, exact = false) {
+  const entered = (text) => (exact ? formatAmount(parseAmount(text), 30) : show(parseAmount(text)));
   if (op.type === 'buy') {
-    return `покупка ${show(quantityOf(op.money, op.price, op.received ?? ''))} ${op.symbol} за ${op.money} $ по ${op.price} $ в ${op.portfolio}`;
+    // Количество при покупке выводится из денег и цены, а не вводится: точным
+    // его показываем, только когда сокращение скрыло бы его.
+    const bought = quantityOf(op.money, op.price, op.received ?? '');
+    return `покупка ${exact && bought < DUST_SHOWN ? formatAmount(bought, 30) : show(bought)} ${op.symbol} за ${op.money} $ по ${op.price} $ в ${op.portfolio}`;
   }
   if (op.type === 'sell') {
-    const what = op.quantity !== undefined ? show(parseAmount(op.quantity)) : `на ${op.money} $`;
+    const what = op.quantity !== undefined ? entered(op.quantity) : `на ${op.money} $`;
     return `продажа ${what} ${op.symbol} из ${op.portfolio} по ${op.price} $`;
   }
-  return `перевод ${show(parseAmount(op.sent))} ${op.symbol}: ${op.from} → ${op.to}, получено ${show(parseAmount(op.received))}`;
+  return `перевод ${entered(op.sent)} ${op.symbol}: ${op.from} → ${op.to}, получено ${entered(op.received)}`;
 }
 
-// То же с датой — для списка несохранённого: после «Перечитать» записи нет
-// нигде, и внести её заново можно только по этому тексту.
-const fullName = (op) => `${opText(op)}, ${showDate(op.date)}`;
+// То же с датой и точными количествами — для списка несохранённого (после
+// «Перечитать» записи нет нигде, и внести её заново можно только по этому
+// тексту) и для вопросов о необратимом: человек подтверждает то, что видит.
+const fullName = (op) => `${opText(op, true)}, ${showDate(op.date)}`;
 
 form.addEventListener('submit', (event) => {
   event.preventDefault();
