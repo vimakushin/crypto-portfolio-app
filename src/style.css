@@ -396,10 +396,6 @@ label.chip {
   font-size: 14px;
 }
 
-#failed .notice {
-  margin-top: 12px;
-}
-
 #price-note {
   margin-top: 12px;
 }
@@ -438,20 +434,6 @@ details[open] > summary::before {
 .op time {
   flex: none;
   color: var(--muted);
-}
-
-/* Операция, на которой расчёт остановился: обведена цветом ошибок и подписана. */
-.op.bad {
-  flex-wrap: wrap;
-  padding: 8px;
-  border: 1px solid var(--error);
-  border-radius: 10px;
-}
-
-.op.bad .why {
-  flex-basis: 100%;
-  margin: 0;
-  color: var(--error);
 }
 
 /* Кнопка внесения всегда под большим пальцем: список ниже может быть длинным. */
@@ -522,10 +504,6 @@ textarea {
 #coin-screen h2 {
   margin: 22px 0 0;
   font-size: 16px;
-}
-
-#coin-failed .notice {
-  margin-top: 12px;
 }
 
 /* Строка истории монеты: запись, кнопка «Удалить», а под ними — подтверждение

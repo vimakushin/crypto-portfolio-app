@@ -1019,7 +1019,7 @@ function renderOverview() {
   if (view === 'coin') return renderCoin();
   if (byId('overview').hidden) return;
   renderTabs();
-  const { rows, totals, excluded, failed } = overview(operations, priceState.prices, viewPortfolio);
+  const { rows, totals, excluded } = overview(operations, priceState.prices, viewPortfolio);
 
   byId('sum-cost').textContent = totals.cost === null ? '—' : `${dollars(totals.cost)} $`;
   byId('sum-value').textContent = totals.value === null ? '—' : `${dollars(totals.value)} $`;
@@ -1034,7 +1034,7 @@ function renderOverview() {
 
   // Чего в итоге нет — сразу под числами, а не сноской внизу: частичный итог
   // без названия исключённого был бы ложью, названный — нет.
-  const reasons = { 'no-price': 'нет цены', unbound: 'не привязана к CoinGecko', failed: 'не удалось посчитать' };
+  const reasons = { 'no-price': 'нет цены', unbound: 'не привязана к CoinGecko' };
   text('sum-exclusion', excluded.length === 0 ? ''
     : `Итог без: ${excluded.map((e) => `${e.symbol}${e.cost === null ? '' : ` (вложено ${dollars(e.cost)} $)`} — ${reasons[e.why]}`).join('; ')}.`);
   // Стоимости нет вовсе, ни у одной монеты — причина одна на всех.
@@ -1046,26 +1046,13 @@ function renderOverview() {
   byId('rows').replaceChildren(...rows.map(rowItem));
   byId('rows-hint').hidden = rows.length === 0;
   text('main-message', mainMessage);
-  byId('rows-empty').hidden = rows.length > 0 || failed.length > 0;
+  byId('rows-empty').hidden = rows.length > 0;
 
-  byId('failed').replaceChildren(...failed.map((f) => {
-    const box = el('div', 'notice alert');
-    const message = el('p', '');
-    message.append(el('strong', '', `${f.symbol} не посчитана: `), document.createTextNode(`${f.message}. В итог она не входит.`));
-    const find = el('button', 'chip', 'Открыть монету и найти запись');
-    find.type = 'button';
-    find.addEventListener('click', () => openCoin(f.key));
-    box.append(message, find);
-    return box;
-  }));
-
-  const bad = new Map(failed.map((f) => [f.operation, f.message]));
   const entries = history(operations, viewPortfolio);
   byId('history-title').textContent = `История операций (${entries.length})`;
   byId('history-list').replaceChildren(...entries.map(({ op }) => {
-    const item = el('li', bad.has(op) ? 'op bad' : 'op');
+    const item = el('li', 'op');
     item.append(el('time', '', showDate(op.date)), el('span', '', opText(op)));
-    if (bad.has(op)) item.append(el('p', 'why', `На этой записи расчёт остановился: ${bad.get(op)}`));
     return item;
   }));
 
@@ -1205,13 +1192,13 @@ function renderCoin() {
   // Удалили последнюю запись монеты — монеты больше нет, возвращаемся.
   if (detail.entries.length === 0) return showView('main');
   byId('title').textContent = coinTitle();
-  const { total, portfolios: where, failed } = detail;
+  const { total, portfolios: where } = detail;
   const symbol = detail.entries[0].op.symbol;
 
   byId('coin-cost').textContent = total === null ? '—' : `${dollars(total.cost)} $`;
   byId('coin-value').textContent = total === null || total.value === null ? '—' : `${dollars(total.value)} $`;
   // «Общая» и «в портфеле» — разные средние: подписано, какая из них какая.
-  text('coin-line', total === null ? (failed === null ? 'Сейчас этой монеты нет: всё продано.' : '')
+  text('coin-line', total === null ? 'Сейчас этой монеты нет: всё продано.'
     : `${show(total.quantity)} ${symbol} · ${where.length > 1 ? 'средняя по всем портфелям' : 'средняя'} ${averageText(total.average)} $`);
   const difference = byId('coin-difference');
   difference.className = `difference ${total === null || total.difference === null ? '' : tone(total.difference)}`;
@@ -1226,12 +1213,6 @@ function renderCoin() {
     : priceState.status === 'failed' ? `Текущей стоимости нет: ${priceState.reason}.`
     : 'Текущей стоимости нет: CoinGecko не прислал цену.');
 
-  byId('coin-failed').replaceChildren(...(failed === null ? [] : [(() => {
-    const box = el('div', 'notice alert');
-    box.append(el('p', '', `${symbol} не посчитана: ${failed.message}. В итог она не входит. Запись, на которой расчёт остановился, отмечена ниже: её можно удалить.`));
-    return box;
-  })()]));
-
   byId('coin-portfolios-title').hidden = where.length === 0;
   // С одним портфелем обе средние совпадают и подписи нет: объяснять нечего.
   byId('coin-averages-hint').hidden = where.length < 2;
@@ -1244,13 +1225,11 @@ function renderCoin() {
   }));
 
   byId('coin-history').replaceChildren(...detail.entries.map(({ op }) => {
-    const bad = failed !== null && failed.operation === op;
-    const item = el('li', `op coin-op${bad ? ' bad' : ''}${pendingDelete === op ? ' asking' : ''}${refusal?.blocker === op ? ' blocker' : ''}`);
+    const item = el('li', `op coin-op${pendingDelete === op ? ' asking' : ''}${refusal?.blocker === op ? ' blocker' : ''}`);
     const remove = el('button', 'chip', 'Удалить');
     remove.type = 'button';
     remove.addEventListener('click', () => askDelete(op));
     item.append(el('time', '', showDate(op.date)), el('span', 'text', opText(op)), remove);
-    if (bad) item.append(el('p', 'why', `На этой записи расчёт остановился: ${failed.message}`));
     if (pendingDelete === op) {
       const confirm = el('div', 'confirm');
       confirm.append(el('p', '', `Удалить запись: ${fullName(op)}? Вернуть её потом нельзя. Средние и итоги пересчитаются по оставшимся записям.`));
