@@ -1173,8 +1173,14 @@ function deleteOperation(operation) {
   const index = operations.indexOf(operation);
   const before = coinDetail(operations, viewCoin, priceState.prices).total;
   operations.splice(index, 1);
-  // Подтверждённых записей стало на одну меньше, если удалённая была среди них.
-  if (index < confirmedCount) confirmedCount -= 1;
+  // Подтверждённых записей стало на одну меньше, если удалённая была среди них;
+  // а в хранилище она до подтверждения удаления остаётся — об этом скажет
+  // сообщение, если сохранить не удастся. Незаписанную удалить значит просто
+  // не записывать: в хранилище её не было.
+  if (index < confirmedCount) {
+    confirmedCount -= 1;
+    unsavedDeletions.push(fullName(operation));
+  }
   if (last?.operation === operation) say('');
   pendingDelete = null;
   forgetUnused();
@@ -1227,6 +1233,8 @@ function renderCoin() {
   })()]));
 
   byId('coin-portfolios-title').hidden = where.length === 0;
+  // С одним портфелем обе средние совпадают и подписи нет: объяснять нечего.
+  byId('coin-averages-hint').hidden = where.length < 2;
   byId('coin-portfolios').replaceChildren(...where.map((p) => {
     const head = el('div', 'row-head');
     head.append(el('strong', '', p.name), el('span', 'qty', `${show(p.quantity)} ${symbol}`));
@@ -1337,10 +1345,19 @@ function unsavedList() {
   return names.length === 0 ? '' : `: ${names.join('; ')}`;
 }
 
+// Удалённые записи, которых хранилище ещё не подтвердило: пока сохранение не
+// удалось, они там на месте и вернутся, если закрыть страницу.
+const unsavedDeletions = [];
+const deletionNote = () => unsavedDeletions.length === 0 ? ''
+  : `Удаление не сохранено: ${unsavedDeletions.join('; ')} — в сохранённом эта запись осталась на месте и вернётся, если закрыть страницу.`;
+
 function showSaveState(kind, detail = '') {
   const element = byId('save-state');
   const failed = kind === 'failed' || kind === 'unavailable' || kind === 'stale';
-  if (kind === 'saved') confirmedCount = operations.length;
+  if (kind === 'saved') {
+    confirmedCount = operations.length;
+    unsavedDeletions.length = 0;
+  }
   staleCloud = kind === 'stale';
   // «Записано: …» с кнопкой отмены рядом с «Это не сохранено» говорило бы две
   // противоположные вещи об одной записи; что не сохранено — перечислено ниже.
@@ -1351,8 +1368,10 @@ function showSaveState(kind, detail = '') {
   element.textContent = {
     saving: 'Сохраняю…',
     saved: `Сохранено ${where()} · ${records(operations.length)}`,
-    failed: `Не удалось сохранить: ${detail}. Запись не потеряна: она есть на этой странице, вносить её заново не нужно. Нажмите «Сохранить ещё раз» и не закрывайте страницу, пока не появится «Сохранено». Копию можно сохранить ниже.`,
-    stale: `Данные изменились на другом устройстве, а здесь показано устаревшее состояние. Это не сохранено${unsavedList()}. Нажмите «Перечитать», чтобы увидеть актуальные данные: страница загрузится заново, и всё несохранённое, а также недописанное в полях пропадёт, поэтому перепишите записи отсюда и внесите их заново. Если нужна копия того, что здесь, сначала сохраните её копию ниже.`,
+    // Внесение и удаление говорят разное: внесённая запись есть только здесь,
+    // удалённая — ещё в сохранённом. Каждое названо своими словами.
+    failed: `Не удалось сохранить: ${detail}. ${[operations.length > confirmedCount ? 'Запись не потеряна: она есть на этой странице, вносить её заново не нужно.' : '', deletionNote()].filter(Boolean).join(' ')} Нажмите «Сохранить ещё раз» и не закрывайте страницу, пока не появится «Сохранено». Копию можно сохранить ниже.`,
+    stale: `Данные изменились на другом устройстве, а здесь показано устаревшее состояние. Это не сохранено${unsavedList()}. ${deletionNote()} Нажмите «Перечитать», чтобы увидеть актуальные данные: страница загрузится заново, и всё несохранённое, а также недописанное в полях пропадёт, поэтому перепишите записи отсюда и внесите их заново. Если нужна копия того, что здесь, сначала сохраните её копию ниже.`,
     unavailable: `${unavailableReason}: записи пропадут при закрытии страницы. Выгрузите их копией ниже.`,
   }[kind];
 }
