@@ -1,4 +1,4 @@
-import { calculate, checkHistory, coinKey, formatAmount, formatSignificant, isDate, parseAmount, SCALE } from './calc.js';
+import { calculate, checkHistory, coinKey, divide, formatAmount, formatSignificant, isDate, multiplyExact, parseAmount, SCALE } from './calc.js';
 import { coinDetail, history, overview, removalCheck } from './overview.js';
 import { fetchPrices, searchCoins } from './prices.js';
 import { createStore, makeExport, pickBackend, readExport, readPasted } from './storage.js';
@@ -39,6 +39,14 @@ let addingTo = false;
 const presets = new Map();
 // «Получено» при переводе повторяет «отправлено», пока его не тронули.
 let movedTouched = false;
+// Как вносится покупка: 'money' — потратил столько-то (основной способ, ТЗ,
+// раздел 3) или 'quantity' — получил столько-то монет. Выбор держится, пока
+// открыта страница: кто вносит по количеству, не переключает его каждый раз.
+let buyBy = 'money';
+// В способе «количество» деньги подставляются как количество × цена, пока
+// человек их не вписал сам. Вписанное — истина (биржа могла взять больше), и
+// считать заново поверх него нельзя.
+let moneyTyped = false;
 // Последняя запись — её можно отменить: { operation }.
 let last = null;
 
@@ -46,6 +54,7 @@ const form = document.getElementById('operation');
 const input = {
   coin: document.getElementById('coin'),
   money: document.getElementById('money'),
+  bought: document.getElementById('bought'),
   price: document.getElementById('price'),
   received: document.getElementById('received'),
   portfolio: document.getElementById('portfolio'),
@@ -158,7 +167,8 @@ function showHints() {
   const money = normalize(input.money.value);
   const price = normalize(input.price.value);
   const received = normalize(input.received.value);
-  if (mode === 'buy' && isAmount(money) && isAmount(price)) {
+  if (mode === 'buy' && buyBy === 'quantity') syncMoney(price);
+  if (mode === 'buy' && buyBy === 'money' && isAmount(money) && isAmount(price)) {
     const bought = quantityOf(money, price);
     const got = isAmount(received) ? quantityOf(money, price, received) : undefined;
     if (got === undefined) quantity = `Количество: ${show(bought)} ${symbol}`;
@@ -183,6 +193,25 @@ function showHints() {
   text('moved-fee', networkFee);
   // Подставленное «получено» бледнее набранного: видно, что это не ввод человека.
   input.moved.classList.toggle('mirrored', !movedTouched);
+}
+
+// Способ «количество»: деньги = количество × цена, точно. Пока человек не
+// вписал деньги сам, поле пересчитывается при каждом изменении количества и
+// цены; вписанное не трогаем. Подпись говорит, откуда число, а когда вписано
+// иное — по какой цене на деле вышла монета.
+function syncMoney(price) {
+  const bought = normalize(input.bought.value);
+  let note = '';
+  if (!moneyTyped) {
+    const product = isAmount(bought) && isAmount(price) ? multiplyExact(parseAmount(bought), parseAmount(price)) : null;
+    input.money.value = product === null ? '' : formatAmount(product, 30);
+    if (product !== null) note = 'Посчитано: количество × цена. Если заплатили иначе, поправьте.';
+    else if (isAmount(bought) && isAmount(price)) note = 'Точно не посчиталось, слишком много знаков: впишите, сколько потратили.';
+  } else if (isAmount(normalize(input.money.value)) && isAmount(bought)) {
+    const paid = parseAmount(normalize(input.money.value));
+    note = `Выходит по ${showPrice(divide(paid * SCALE, parseAmount(bought)))} $ за монету.`;
+  }
+  text('money-hint', note);
 }
 
 // По значащим цифрам: рост средней на 0.0004% не должен выглядеть как «0%».
@@ -213,6 +242,35 @@ const titles = { buy: 'покупку', sell: 'продажу', transfer: 'пе�
 // и тоже остаются.
 const remembered = { buy: {}, sell: {}, transfer: {} };
 
+// Поля покупки под выбранный способ. Деньги в способе «количество» стоят после
+// цены (они из неё считаются), в основном способе — до неё, как всегда.
+function applyBuyBy() {
+  const byQuantity = buyBy === 'quantity';
+  for (const button of document.querySelectorAll('[data-by]')) {
+    button.setAttribute('aria-pressed', String(button.dataset.by === buyBy));
+  }
+  if (mode !== 'buy') return;
+  document.getElementById('bought-field').hidden = !byQuantity;
+  document.getElementById('received-field').hidden = byQuantity;
+  document.getElementById('price-field')[byQuantity ? 'after' : 'before'](document.getElementById('money-field'));
+}
+
+for (const button of document.querySelectorAll('[data-by]')) {
+  button.addEventListener('click', () => {
+    if (button.dataset.by === buyBy) return;
+    buyBy = button.dataset.by;
+    // Вписанное относилось к другому способу: сумма «потрачено» и «получено»
+    // там значили разное, оставить их значило бы записать не то.
+    for (const field of [input.money, input.bought, input.received]) field.value = '';
+    moneyTyped = false;
+    for (const name of ['money', 'bought', 'received']) setError(name, '');
+    text('money-hint', '');
+    applyBuyBy();
+    showHints();
+    (buyBy === 'quantity' ? input.bought : input.money).focus();
+  });
+}
+
 function setMode(next) {
   remembered[mode] = { coin: selectedCoin, from: fromPortfolio, to: toPortfolio };
   const previousCoin = selectedCoin;
@@ -224,6 +282,7 @@ function setMode(next) {
   for (const button of document.querySelectorAll('[data-mode]')) {
     button.setAttribute('aria-pressed', String(button.dataset.mode === mode));
   }
+  applyBuyBy();
   text('submit', `Записать ${titles[mode]}`);
   // Подтверждение прошлой записи под другой вкладкой читается как результат
   // того, что вносишь сейчас, а «Отменить» рядом с ним отменило бы не то.
@@ -565,13 +624,21 @@ function readBuy(date) {
   const coin = selectedCoin ?? (typed && canRecordUnbound() ? { id: null, symbol: typed, name: '' } : null);
   const money = normalize(input.money.value);
   const price = normalize(input.price.value);
-  const received = normalize(input.received.value);
+  // «Получено» в способе «количество» — это само количество, оно же и есть
+  // полученное: расчёт тот же, что при комиссии монетами.
+  const byQuantity = buyBy === 'quantity';
+  const bought = normalize(input.bought.value);
+  const received = byQuantity ? bought : normalize(input.received.value);
   const portfolio = input.portfolio.hidden ? selectedPortfolio : portfolioName(input.portfolio.value);
   const problems = {
     coin: coin ? '' : typed ? 'Выберите монету из списка под полем' : 'Укажите монету',
-    money: isAmount(money) ? '' : 'Нужно число больше нуля, например 200',
+    bought: !byQuantity || isAmount(bought) ? '' : 'Нужно число больше нуля, например 1.3684',
+    money: !isAmount(money)
+      ? (byQuantity && isAmount(bought) && isAmount(price) ? 'Точно не посчиталось: впишите, сколько потратили' : 'Нужно число больше нуля, например 200')
+      : byQuantity && isAmount(bought) && isAmount(price) && quantityOf(money, price, bought) === null
+        ? 'Потрачено меньше, чем количество × цена. Проверьте деньги, количество и цену' : '',
     price: isAmount(price) ? '' : 'Нужно число больше нуля, например 146.12',
-    received: !received ? ''
+    received: byQuantity ? '' : !received ? ''
       : !isAmount(received) ? 'Нужно число больше нуля — или оставьте пустым'
       : isAmount(money) && isAmount(price) && quantityOf(money, price, received) === null
         ? 'Получено больше, чем потрачено ÷ цена. Проверьте цену и количество' : '',
@@ -772,9 +839,11 @@ form.addEventListener('submit', (event) => {
   // Дата возвращается к сегодняшней: иначе после одной старой записи
   // следующая, сегодняшняя, молча ушла бы задним числом.
   clearPresets();
-  for (const field of [input.money, input.price, input.received, input.portfolio, input.sold, input.sent, input.moved, input.to]) {
+  for (const field of [input.money, input.bought, input.price, input.received, input.portfolio, input.sold, input.sent, input.moved, input.to]) {
     field.value = '';
   }
+  moneyTyped = false;
+  text('money-hint', '');
   movedTouched = false;
   addingTo = false;
   toPortfolio = null;
@@ -849,11 +918,20 @@ input.coin.addEventListener('keydown', (event) => {
 
 // Enter на клавиатуре телефона ведёт к следующему полю, а в цене — записывает:
 // «получено» нужно редко и не должно стоять на пути обычной записи.
-for (const [from, to] of [[input.coin, input.money], [input.money, input.price], [input.sold, input.price]]) {
+// В способе «количество» деньги стоят после цены: из денег Enter записывает.
+const quantityEntry = () => mode === 'buy' && buyBy === 'quantity';
+const nextField = new Map([
+  [input.coin, () => (quantityEntry() ? input.bought : input.money)],
+  [input.money, () => (quantityEntry() ? null : input.price)],
+  [input.bought, () => input.price],
+  [input.sold, () => input.price],
+]);
+for (const [from, to] of nextField) {
   from.addEventListener('keydown', (event) => {
-    if (event.key !== 'Enter') return;
+    const next = to();
+    if (event.key !== 'Enter' || next === null) return;
     event.preventDefault();
-    to.focus();
+    next.focus();
   });
 }
 
@@ -889,7 +967,7 @@ input.price.addEventListener('keydown', (event) => {
 input.price.addEventListener('focus', () => { if (priceAuto) input.price.select(); });
 
 // Исправляемое поле перестаёт быть красным сразу, а не после следующей записи.
-for (const name of ['coin', 'money', 'price', 'received', 'portfolio', 'date', 'sold', 'sent', 'moved', 'to']) {
+for (const name of ['coin', 'money', 'bought', 'price', 'received', 'portfolio', 'date', 'sold', 'sent', 'moved', 'to']) {
   input[name].addEventListener('input', () => {
     setError(name, '');
     text('record-error', '');
@@ -912,7 +990,21 @@ input.coin.addEventListener('input', () => {
   renderCoins();
   showHints();
 });
-input.money.addEventListener('input', showHints);
+input.money.addEventListener('input', () => {
+  // Что-то набрано в деньгах — они больше не пересчитываются. Пустое поле, пока
+  // в нём стоит курсор, не заполняем обратно: иначе его нельзя было бы стереть,
+  // чтобы набрать другое число.
+  moneyTyped = true;
+  showHints();
+});
+// Ушли с пустых денег — снова считаются из количества и цены.
+input.money.addEventListener('blur', () => {
+  if (input.money.value.trim() === '' && moneyTyped) {
+    moneyTyped = false;
+    showHints();
+  }
+});
+input.bought.addEventListener('input', showHints);
 input.price.addEventListener('input', () => {
   priceAuto = false;
   input.price.classList.remove('mirrored');

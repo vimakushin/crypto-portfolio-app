@@ -32,6 +32,16 @@ export function divide(a, b) {
 // Число для показа человеку: округлено до ближайшего на digits знаков после
 // точки (digits от 1 до 30 — точнее числа не хранятся), нули в конце
 // убраны — «0.002», а не «0.00200000».
+// Количество × цена — потраченные деньги при вводе «сколько получил». В отличие
+// от деления, умножение точное: ничего не округляется, и остатка арифметики не
+// возникает. Но произведение двух чисел с 30 знаками имеет до 60, а хранится 30:
+// если оно не помещается без потери, возвращаем null, и деньги вводит человек —
+// молча округлить значило бы записать не то, что получилось.
+export function multiplyExact(quantity, price) {
+  const product = quantity * price;
+  return product % SCALE === 0n ? product / SCALE : null;
+}
+
 export function formatAmount(units, digits) {
   const text = divide(units, 10n ** BigInt(30 - digits)).toString().padStart(digits + 1, '0');
   const fraction = text.slice(-digits).replace(/0+$/, '');

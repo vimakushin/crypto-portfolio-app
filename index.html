@@ -104,6 +104,22 @@
         <p class="error" id="coin-error"></p>
       </div>
 
+      <!-- Два способа внести покупку: по умолчанию деньги, как в ТЗ (раздел 3);
+           по количеству — когда биржа показывает именно его. Выбранный виден. -->
+      <div class="field" data-modes="buy">
+        <span class="label" id="by-label">Что знаете</span>
+        <div class="chips" id="buy-by" role="group" aria-labelledby="by-label">
+          <button type="button" class="chip" data-by="money" aria-pressed="true">Сколько потратил</button>
+          <button type="button" class="chip" data-by="quantity" aria-pressed="false">Сколько получил монет</button>
+        </div>
+      </div>
+
+      <div class="field" id="bought-field" data-modes="buy" hidden>
+        <label for="bought">Получено монет</label>
+        <input id="bought" name="bought" inputmode="decimal" autocomplete="off" placeholder="Сколько пришло" enterkeyhint="next">
+        <p class="error" id="bought-error"></p>
+      </div>
+
       <div class="field" data-modes="sell transfer">
         <span class="label" id="from-label">Портфель</span>
         <div class="chips" id="from" role="group" aria-labelledby="from-label"></div>
@@ -118,9 +134,10 @@
         <p class="error" id="to-error"></p>
       </div>
 
-      <div class="field" data-modes="buy">
+      <div class="field" id="money-field" data-modes="buy">
         <label for="money">Потрачено, $</label>
         <input id="money" name="money" inputmode="decimal" autocomplete="off" placeholder="Сколько потратили" enterkeyhint="next">
+        <p class="hint" id="money-hint"></p>
         <p class="error" id="money-error"></p>
       </div>
 
@@ -154,7 +171,7 @@
         <p class="error" id="moved-error"></p>
       </div>
 
-      <div class="field" data-modes="buy sell">
+      <div class="field" id="price-field" data-modes="buy sell">
         <label for="price">Цена за монету, $</label>
         <input id="price" name="price" inputmode="decimal" autocomplete="off" placeholder="По какой цене купили" enterkeyhint="done">
         <p class="hint" id="price-source"></p>
@@ -162,7 +179,7 @@
         <p class="error" id="price-error"></p>
       </div>
 
-      <div class="field" data-modes="buy">
+      <div class="field" id="received-field" data-modes="buy">
         <label for="received">Получено монет (только если пришло меньше)</label>
         <input id="received" name="received" inputmode="decimal" autocomplete="off"
                placeholder="Необязательно" enterkeyhint="done">

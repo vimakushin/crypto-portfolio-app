@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { calculate, parseAmount, SCALE } from '../src/calc.js';
+import { calculate, formatAmount, multiplyExact, parseAmount, SCALE } from '../src/calc.js';
 import { coinDetail, history, overview, removalCheck } from '../src/overview.js';
 
 const units = (text) => parseAmount(text);
@@ -325,3 +325,13 @@ test('покупка и тут же цена, равная цене покупк
   assert.equal(small.difference, units('0.001'));
   assert.notEqual(small.percent, null);
 });
+
+test('покупка по количеству и цене, равной цене покупки: стоимость ровно равна вложенному, остатка нет вовсе', () => {
+  for (const [quantity, price] of [['1.3684', '146.12'], ['0.5', '3'], ['33.333333', '0.3']]) {
+    const money = formatAmount(multiplyExact(parseAmount(quantity), parseAmount(price)), 30);
+    const operations = [{ type: 'buy', date: '2026-01-10', coin: 'solana', symbol: 'SOL', portfolio: 'Binance', money, price, received: quantity }];
+    const row = overview(operations, prices({ solana: price })).rows[0];
+    assert.equal(row.value - row.cost, 0n, `${quantity} × ${price}: остатка арифметики нет`);
+  }
+});
+

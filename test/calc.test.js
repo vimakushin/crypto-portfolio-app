@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { calculate, formatAmount, formatSignificant, parseAmount, SCALE } from '../src/calc.js';
+import { calculate, formatAmount, formatSignificant, multiplyExact, parseAmount, SCALE } from '../src/calc.js';
 
 // Ожидаемые значения посчитаны вручную и записаны дробями: near(x, 400, 3)
 // значит «x равно 400/3». Расчёт округляет деление в 30-м знаке, поэтому
@@ -427,3 +427,42 @@ test('невозможные операции дают ошибку, а не ч�
   fails([buy('01.01.2026', 'Binance', '100', '100')], /ГГГГ-ММ-ДД/);
   fails([{ ...buy('2026-01-01', 'Binance', '100', '100'), type: 'swap' }], /неизвестный вид/);
 });
+
+// --- Покупка по количеству: деньги = количество × цена ---
+
+test('количество × цена считается точно: без остатка, количество и вложенное ровно те, что введены', () => {
+  const cases = [['1.3684', '146.12'], ['0.5', '3'], ['33.333333', '0.3'], ['0.00012345', '97431.17'], ['1000000', '0.00000123'], ['7', '1']];
+  for (const [quantity, price] of cases) {
+    const money = multiplyExact(parseAmount(quantity), parseAmount(price));
+    assert.notEqual(money, null, `${quantity} × ${price}`);
+    // Тот же путь, что у формы: деньги, цена и «получено» = количество.
+    const op = { type: 'buy', date: '2026-01-10', coin: 'solana', symbol: 'SOL', portfolio: 'Binance', money: formatAmount(money, 30), price, received: quantity };
+    const position = calculate([op]).coins.get('solana');
+    assert.deepEqual(calculate([op]).errors, [], `${quantity} × ${price}: расчёт принял`);
+    assert.equal(position.quantity, parseAmount(quantity), `${quantity} × ${price}: количество`);
+    assert.equal(position.cost, money, `${quantity} × ${price}: вложено`);
+    assert.equal(position.average, parseAmount(price), `${quantity} × ${price}: средняя равна цене покупки, без остатка`);
+    // И расчёт «по деньгам» из тех же денег даёт то же количество: оба способа сходятся.
+    const byMoney = calculate([{ ...op, received: undefined }]).coins.get('solana');
+    assert.equal(byMoney.quantity, position.quantity, `${quantity} × ${price}: оба способа`);
+  }
+});
+
+test('произведение, не помещающееся в 30 знаков, не округляется молча: null', () => {
+  assert.equal(multiplyExact(parseAmount('0.000000000000000000000000000001'), parseAmount('0.5')), null);
+  assert.equal(multiplyExact(parseAmount('0.000000000000000000000000000001'), parseAmount('2')), parseAmount('0.000000000000000000000000000002'));
+});
+
+test('деньги поправлены вверх (заплатили больше): вложено ровно вписанное, количество — введённое, средняя выше цены', () => {
+  const op = { type: 'buy', date: '2026-01-10', coin: 'solana', symbol: 'SOL', portfolio: 'Binance', money: '210', price: '100', received: '2' };
+  const position = calculate([op]).coins.get('solana');
+  assert.equal(position.quantity, parseAmount('2'));
+  assert.equal(position.cost, parseAmount('210'));
+  assert.equal(position.average, parseAmount('105'));
+});
+
+test('деньги поправлены вниз (меньше количества × цена): расчёт отказывает, а не берёт на веру', () => {
+  const op = { type: 'buy', date: '2026-01-10', coin: 'solana', symbol: 'SOL', portfolio: 'Binance', money: '190', price: '100', received: '2' };
+  assert.equal(calculate([op]).errors.length, 1);
+});
+
