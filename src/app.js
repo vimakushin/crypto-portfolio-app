@@ -199,6 +199,17 @@ function showHints() {
 // вписал деньги сам, поле пересчитывается при каждом изменении количества и
 // цены; вписанное не трогаем. Подпись говорит, откуда число, а когда вписано
 // иное — по какой цене на деле вышла монета.
+// Самая высокая цена за монету, при которой расчёт примет эти деньги и это
+// количество: расчёт отказывает, когда количество больше денег ÷ цена, то
+// есть когда цена выше денег ÷ количество. Берём с запасом вниз, до восьми
+// знаков, чтобы вписанное из подсказки не упёрлось в округление. Пустая
+// строка — если и такой цены нет.
+function highestPrice(money, bought) {
+  const exact = divide(parseAmount(money) * SCALE, parseAmount(bought));
+  const floor = exact - (exact % (10n ** 22n));
+  return floor > 0n ? formatAmount(floor, 30) : '';
+}
+
 function syncMoney(price) {
   const bought = normalize(input.bought.value);
   let note = '';
@@ -208,8 +219,13 @@ function syncMoney(price) {
     if (product !== null) note = 'Посчитано: количество × цена. Если заплатили иначе, поправьте.';
     else if (isAmount(bought) && isAmount(price)) note = 'Точно не посчиталось, слишком много знаков: впишите, сколько потратили.';
   } else if (isAmount(normalize(input.money.value)) && isAmount(bought)) {
-    const paid = parseAmount(normalize(input.money.value));
-    note = `Выходит по ${showPrice(divide(paid * SCALE, parseAmount(bought)))} $ за монету.`;
+    const paid = normalize(input.money.value);
+    const highest = isAmount(price) && quantityOf(paid, price, bought) === null ? highestPrice(paid, bought) : null;
+    // Цена в записи — та, что в поле «Цена за монету»: подпись не должна
+    // выглядеть как другая цена, которая запишется.
+    note = highest === null
+      ? `По вашим деньгам выходит ${showPrice(divide(parseAmount(paid) * SCALE, parseAmount(bought)))} $ за монету. В запись идёт цена из поля «Цена за монету».`
+      : `Цена в поле «Цена за монету» выше, чем вышло по вашим деньгам.${highest ? ` Впишите там не больше ${highest} $.` : ''}`;
   }
   text('money-hint', note);
 }
@@ -342,7 +358,8 @@ function selectCoin(coin) {
   setError('coin', '');
   render();
   fillPrice();
-  input.money.focus();
+  // В способе «количество» деньги стоят после цены: сначала количество.
+  (quantityEntry() ? input.bought : input.money).focus();
 }
 
 // Продажа и перевод: монета из тех, что лежат.
@@ -628,15 +645,17 @@ function readBuy(date) {
   // полученное: расчёт тот же, что при комиссии монетами.
   const byQuantity = buyBy === 'quantity';
   const bought = normalize(input.bought.value);
+  // Сколько вышло бы по количеству и цене: называется в отказе, чтобы было видно, что вписать.
+  const product = byQuantity && isAmount(bought) && isAmount(price) ? multiplyExact(parseAmount(bought), parseAmount(price)) : null;
   const received = byQuantity ? bought : normalize(input.received.value);
   const portfolio = input.portfolio.hidden ? selectedPortfolio : portfolioName(input.portfolio.value);
   const problems = {
     coin: coin ? '' : typed ? 'Выберите монету из списка под полем' : 'Укажите монету',
     bought: !byQuantity || isAmount(bought) ? '' : 'Нужно число больше нуля, например 1.3684',
     money: !isAmount(money)
-      ? (byQuantity && isAmount(bought) && isAmount(price) ? 'Точно не посчиталось: впишите, сколько потратили' : 'Нужно число больше нуля, например 200')
+      ? (product === null && byQuantity && isAmount(bought) && isAmount(price) ? 'Точно не посчиталось, слишком много знаков: впишите, сколько потратили' : 'Нужно число больше нуля, например 200')
       : byQuantity && isAmount(bought) && isAmount(price) && quantityOf(money, price, bought) === null
-        ? 'Потрачено меньше, чем количество × цена. Проверьте деньги, количество и цену' : '',
+        ? `Цена за монету (${price} $) слишком высока для этих денег и этого количества${highestPrice(money, bought) ? `: впишите в «Цена за монету» не больше ${highestPrice(money, bought)} $` : ''}. Или поправьте деньги и количество` : '',
     price: isAmount(price) ? '' : 'Нужно число больше нуля, например 146.12',
     received: byQuantity ? '' : !received ? ''
       : !isAmount(received) ? 'Нужно число больше нуля — или оставьте пустым'
@@ -1414,6 +1433,8 @@ function resetView() {
   addingPortfolio = false;
   addingTo = false;
   movedTouched = false;
+  moneyTyped = false;
+  text('money-hint', '');
   priceAuto = false;
   for (const key of Object.keys(remembered)) remembered[key] = {};
   clearPresets();
